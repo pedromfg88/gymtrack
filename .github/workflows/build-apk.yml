@@ -1,0 +1,122 @@
+name: Compilar APK
+
+on:
+  # Compila sozinho sempre que alteras a app (src/) ou a parte nativa
+  push:
+    branches: [main, master]
+    paths:
+      - 'src/**'
+      - 'test/**'
+      - 'native/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'capacitor.config.json'
+      - '.github/workflows/build-apk.yml'
+  # ...ou manualmente: separador Actions → "Compilar APK" → Run workflow
+  workflow_dispatch:
+
+permissions:
+  contents: write   # necessário para publicar o APK na secção Releases
+
+concurrency:
+  group: build-apk
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Código
+        uses: actions/checkout@v4
+
+      - name: Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Testes (CSV, sincronização com o Drive)
+        run: npm test
+
+      - name: Gerar o projeto Android (app + plugins + ícones)
+        run: npm run android:prepare
+
+      - name: Cache do Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Componentes do Android SDK
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+          "$SDKM" "platforms;android-36" "build-tools;36.0.0" > /dev/null 2>&1 || true
+
+      - name: Chave de assinatura
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          for v in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!v}" ]; then
+              echo "::error::Falta o segredo $v (Settings → Secrets and variables → Actions)."
+              exit 1
+            fi
+          done
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/gymtrack.keystore"
+          echo "KEYSTORE_PATH=$RUNNER_TEMP/gymtrack.keystore" >> "$GITHUB_ENV"
+
+      - name: Compilar APK assinado
+        working-directory: android
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          VERSION_CODE: ${{ github.run_number }}
+          VERSION_NAME: 1.0.${{ github.run_number }}
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Verificar assinatura
+        id: apk
+        run: |
+          APK="android/app/build/outputs/apk/release/app-release.apk"
+          test -f "$APK" || { echo "::error::APK não encontrado em $APK"; exit 1; }
+          APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          "$APKSIGNER" verify --print-certs "$APK" | tee cert.txt
+          SHA1=$(grep -i "SHA-1 digest" cert.txt | head -1 | sed 's/.*: //')
+          {
+            echo "### APK compilado"
+            echo "- Versão: 1.0.${{ github.run_number }}"
+            echo "- SHA-1 do certificado (tem de ser igual ao registado no Google Cloud): \`$SHA1\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          cp "$APK" "GymTrack.apk"
+          echo "path=GymTrack.apk" >> "$GITHUB_OUTPUT"
+
+      - name: Guardar APK (artefacto)
+        uses: actions/upload-artifact@v4
+        with:
+          name: GymTrack-apk
+          path: ${{ steps.apk.outputs.path }}
+          retention-days: 30
+
+      - name: Publicar na secção Releases (apk-latest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete apk-latest --yes --cleanup-tag || true
+          gh release create apk-latest "${{ steps.apk.outputs.path }}" \
+            --title "APK mais recente (v1.0.${{ github.run_number }})" \
+            --notes "Compilado automaticamente a partir do commit ${GITHUB_SHA::7}. Descarrega o ficheiro .apk e instala-o no telemóvel." \
+            --target "$GITHUB_SHA"
