@@ -1,0 +1,13 @@
+{
+  "appId": "pt.pedrogoncalves.gymtrack",
+  "appName": "GymTrack",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "SystemBars": {
+      "style": "DARK"
+    }
+  }
+}
