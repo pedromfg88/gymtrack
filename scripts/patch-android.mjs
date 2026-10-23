@@ -89,6 +89,10 @@ edit('android/gradle.properties', 'org.gradle.jvmargs=-Xmx1536m', 'org.gradle.jv
 // 4) Manifesto: sem backup automático (a sessão vive no Drive) e heap grande (fotografias)
 edit(join(MAIN, 'AndroidManifest.xml'), 'android:allowBackup="true"', 'android:allowBackup="false"\n        android:largeHeap="true"', 'manifesto (backup/heap)');
 
+// 4b) Alarme do temporizador de descanso: recetor do alarme (manifesto) e vibração
+edit(join(MAIN, 'AndroidManifest.xml'), '    </application>', '        <receiver android:name=".RestAlarmReceiver" android:exported="false" />\n    </application>', 'manifesto (recetor do alarme)');
+edit(join(MAIN, 'AndroidManifest.xml'), '<uses-permission android:name="android.permission.INTERNET" />', '<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.VIBRATE" />', 'manifesto (vibração)');
+
 // 5) Cores e temas: cor da app em toda a janela (barras do sistema) e no arranque
 write(join(RES, 'values/ic_launcher_background.xml'),
 `<?xml version="1.0" encoding="utf-8"?>

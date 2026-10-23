@@ -5,13 +5,15 @@ import {
   CSV_NAME, FOLDER_NAME, BACKUP_FOLDER_NAME,
   exerciseKey, logsToCsv, parseCsv, mergeLogsU, liveLogs, setDayEntry,
   createDrive, createSync, classifyError, loadLocal, saveLocal, loadAccount, saveAccount, clearAccount,
+  PLAN_NAME, guessType, emptyPlan, planFromTemplate, addExerciseToCycle, removeExerciseFromCycle, moveExercise,
+  setCycleFocus, setPlanLabel, planNames, historyExercises, mergePlan, planToCsv, parsePlanCsv,
 } from "../src/store.mjs";
 
 import { FakeDrive } from "./fake-drive.mjs";
 
 function makeApp(drive, init = {}) {
   const kv = { m: new Map(), get(k) { return this.m.get(k); }, set(k, v) { this.m.set(k, v); } };
-  const app = { state: { logs: init.logs || {}, names: init.names || {} }, statuses: [], kv, day: init.day || "2026-10-21", account: init.account === undefined ? "pedro@gmail.com" : init.account };
+  const app = { state: { logs: init.logs || {}, names: init.names || {}, plan: init.plan || null }, statuses: [], kv, day: init.day || "2026-10-21", account: init.account === undefined ? "pedro@gmail.com" : init.account };
   let tok = init.token || "good";
   app.sync = createSync({
     drive: createDrive({
@@ -20,9 +22,10 @@ function makeApp(drive, init = {}) {
       fetchFn: drive.fetch,
     }),
     getLocal: () => app.state,
-    applyRemote: ({ logs, names }) => {
+    applyRemote: ({ logs, names, plan }) => {
       app.state.logs = mergeLogsU(app.state.logs, logs);
       app.state.names = { ...names, ...app.state.names };
+      app.state.plan = mergePlan(app.state.plan, plan);
     },
     setStatus: (s) => app.statuses.push(s),
     kv,
@@ -107,11 +110,11 @@ test("liveLogs esconde dias apagados; setDayEntry guarda, atualiza e apaga", () 
 
 test("armazenamento local: guarda e lê; lixo no armazenamento não rebenta", () => {
   const st = { m: new Map(), getItem(k) { return this.m.has(k) ? this.m.get(k) : null; }, setItem(k, v) { this.m.set(k, v); } };
-  assert.deepEqual(loadLocal(st), { logs: {}, names: {} });
+  assert.deepEqual(loadLocal(st), { logs: {}, names: {}, plan: null });
   assert.equal(saveLocal({ logs: { [AIR]: [{ date: "2026-10-21", sets: [S(5, 5)], u: 1 }] }, names: { [AIR]: "Air Bike" } }, st), true);
   assert.equal(loadLocal(st).names[AIR], "Air Bike");
   st.m.set("gymtrack-data", "{isto não é json");
-  assert.deepEqual(loadLocal(st), { logs: {}, names: {} });
+  assert.deepEqual(loadLocal(st), { logs: {}, names: {}, plan: null });
 });
 
 /* ---------- sincronização ---------- */
@@ -329,4 +332,192 @@ test("conta confirmada: guardar, ler (em minúsculas) e limpar", () => {
   assert.equal(loadAccount(st), "pedro@gmail.com");
   clearAccount(st);
   assert.equal(loadAccount(st), "");
+});
+
+/* ---------- plano de treino editável ---------- */
+const TPL = {
+  label: "Programa de Adaptação",
+  workouts: {
+    1: { name: "Ciclo 1", focus: "Pernas", color: "#C8FF3D", exercises: [{ name: "Air Bike", type: "cardio" }, { name: "Hack Squat", type: "legs_push" }] },
+    2: { name: "Ciclo 2", focus: "Costas", color: "#3DD9FF", exercises: [{ name: "Air Bike", type: "cardio" }, { name: "Remada Baixa", type: "pull" }] },
+    3: { name: "Ciclo 3", focus: "", color: "#FF8A3D", exercises: [] },
+  },
+};
+
+test("ícone sugerido pelo nome (só estético; sem correspondência fica 'core')", () => {
+  const casos = {
+    "Passadeira": "cardio", "Chest press máquina": "press_chest", "Peck Fly": "fly", "Biceps 21": "curl", "Leg Curl": "legs_curl",
+    "Leg Extension": "legs_extend", "Triceps Unilateral na polia": "press_shoulder", "Seated Row máquina": "pull",
+    "Gémeos Máquina Sentado": "calf", "Agachamento com KB": "legs_push", "Puxada Frontal": "pull_down", "Elevações laterais": "raise",
+    "Biceps Barra na Polia": "curl", "Máquina Glúteos pés no step": "hinge", "Coisa Estranha": "core",
+  };
+  for (const [nome, tipo] of Object.entries(casos)) assert.equal(guessType(nome), tipo, nome);
+});
+
+test("plano: em branco tem 3 ciclos vazios; modelo copia os ciclos e exercícios", () => {
+  const p = emptyPlan("O meu plano", 100);
+  assert.deepEqual(Object.keys(p.cycles), ["1", "2", "3"]);
+  assert.ok(Object.values(p.cycles).every((c) => c.exercises.length === 0));
+  const t = planFromTemplate(TPL, "Programa de Adaptação", 100);
+  assert.equal(t.cycles[1].exercises.length, 2);
+  assert.equal(t.cycles[3].exercises.length, 0);
+  t.cycles[1].exercises.push({ name: "X", type: "core" });
+  assert.equal(TPL.workouts[1].exercises.length, 2, "o modelo não pode ser alterado");
+});
+
+test("plano: adicionar (nome limpo, ícone sugerido, sem duplicados no ciclo, mas pode estar noutro ciclo)", () => {
+  let p = emptyPlan("P", 100);
+  let r = addExerciseToCycle(p, "1", { name: "  Leg   Curl  " }, 200);
+  assert.deepEqual(r.plan.cycles[1].exercises, [{ name: "Leg Curl", type: "legs_curl" }]);
+  assert.ok(r.plan.u > p.u);
+  p = r.plan;
+  assert.match(addExerciseToCycle(p, "1", { name: "leg curl" }, 300).error, /já está/i);
+  assert.match(addExerciseToCycle(p, "1", { name: "   " }, 300).error, /nome/i);
+  r = addExerciseToCycle(p, "2", { name: "Leg Curl" }, 300);
+  assert.equal(r.plan.cycles[2].exercises.length, 1);
+  assert.equal(r.plan.cycles[1].exercises.length, 1);
+});
+
+test("plano: retirar mantém a biblioteca (ícone) só se houver histórico e só se já não estiver noutro ciclo", () => {
+  let p = planFromTemplate(TPL, "P", 100);
+  const comHist = removeExerciseFromCycle(p, "1", exerciseKey("Hack Squat"), true, 200);
+  assert.deepEqual(comHist.cycles[1].exercises.map((e) => e.name), ["Air Bike"]);
+  assert.deepEqual(comHist.library, [{ name: "Hack Squat", type: "legs_push" }]);
+  const semHist = removeExerciseFromCycle(p, "2", exerciseKey("Remada Baixa"), false, 200);
+  assert.deepEqual(semHist.library, []);
+  const noutroCiclo = removeExerciseFromCycle(p, "1", exerciseKey("Air Bike"), true, 200);   // continua no ciclo 2
+  assert.deepEqual(noutroCiclo.library, []);
+  const volta = addExerciseToCycle(comHist, "3", { name: "Hack Squat" }, 300);                // volta com o mesmo ícone
+  assert.equal(volta.plan.cycles[3].exercises[0].type, "legs_push");
+  assert.deepEqual(volta.plan.library, []);
+  assert.equal(removeExerciseFromCycle(p, "1", "nao_existe", true, 200), p);
+});
+
+test("plano: mudar a ordem, o texto do ciclo e o nome do plano", () => {
+  let p = planFromTemplate(TPL, "P", 100);
+  p = moveExercise(p, "1", exerciseKey("Hack Squat"), -1, 200);
+  assert.deepEqual(p.cycles[1].exercises.map((e) => e.name), ["Hack Squat", "Air Bike"]);
+  assert.equal(moveExercise(p, "1", exerciseKey("Hack Squat"), -1, 300), p, "no limite não faz nada");
+  p = setCycleFocus(p, "3", "  Braços e   ombros ", 300);
+  assert.equal(p.cycles[3].focus, "Braços e ombros");
+  p = setPlanLabel(p, "Novo plano", 400);
+  assert.equal(p.label, "Novo plano");
+  assert.equal(setPlanLabel(p, "   ", 500), p);
+});
+
+test("CSV do plano: ida e volta (ciclo vazio, biblioteca, acentos, ; e aspas, ordem)", () => {
+  let p = planFromTemplate(TPL, 'Plano "A"; Out', 1760000000000);
+  p = addExerciseToCycle(p, "1", { name: 'Rosca "21"; Direta' }, 1760000001000).plan;
+  p = removeExerciseFromCycle(p, "1", exerciseKey("Hack Squat"), true, 1760000002000);
+  const csv = planToCsv(p);
+  assert.ok(csv.startsWith("\uFEFFplano;ciclo;nome_ciclo;foco;cor;ordem;exercicio;tipo;atualizado\r\n"));
+  const back = parsePlanCsv(csv);
+  assert.deepEqual(back, p);
+  assert.equal(back.cycles[3].exercises.length, 0, "ciclo vazio continua a existir");
+});
+
+test("CSV do plano: formato estranho dá erro; vazio ou só cabeçalho dá 'sem plano'", () => {
+  assert.throws(() => parsePlanCsv("foo;bar\n1;2"), /formato esperado/);
+  assert.equal(parsePlanCsv(""), null);
+  assert.equal(parsePlanCsv("\uFEFFplano;ciclo;nome_ciclo;foco;cor;ordem;exercicio;tipo;atualizado\r\n"), null);
+});
+
+test("plano: o mais recente ganha; empate ganha o Drive; um lado vazio devolve o outro", () => {
+  const a = { ...emptyPlan("A", 10) };
+  const b = { ...emptyPlan("B", 20) };
+  assert.equal(mergePlan(a, b).label, "B");
+  assert.equal(mergePlan(b, a).label, "B");
+  assert.equal(mergePlan({ ...a, u: 20 }, b).label, "B");
+  assert.equal(mergePlan(null, b), b);
+  assert.equal(mergePlan(a, null), a);
+  assert.equal(mergePlan(null, null), null);
+});
+
+test("lista para acrescentar: só exercícios com histórico, fora do ciclo, mais recentes primeiro", () => {
+  const hack = exerciseKey("Hack Squat"), remada = exerciseKey("Remada Baixa"), antigo = exerciseKey("Prensa Horizontal"), fantasma = exerciseKey("Fantasma");
+  let p = planFromTemplate(TPL, "P", 100);
+  p = removeExerciseFromCycle(p, "1", hack, true, 200);                    // retirado do ciclo 1 (tem histórico)
+  const logs = {
+    [hack]: [{ date: "2026-10-10", sets: [S(100, 8)], u: 1 }],
+    [remada]: [{ date: "2026-10-12", sets: [S(40, 10)], u: 1 }, { date: "2026-10-05", sets: [S(35, 10)], u: 1 }],
+    [antigo]: [{ date: "2026-09-01", sets: [S(80, 12)], u: 1 }],
+    [fantasma]: [{ date: "2026-10-20", sets: [], u: 1 }],                  // dia apagado: não conta
+    [AIR]: [{ date: "2026-10-15", sets: [S(5, 5)], u: 1 }],
+  };
+  const names = { [hack]: "Hack Squat", [remada]: "Remada Baixa", [antigo]: "Prensa Horizontal", [AIR]: "Air Bike" };
+  const lista = historyExercises({ logs, names, plan: p }, "1");
+  assert.deepEqual(lista.map((x) => x.name), ["Remada Baixa", "Hack Squat", "Prensa Horizontal"]);   // Air Bike já está no ciclo 1
+  assert.deepEqual(lista[0].inCycles, ["2"]);
+  assert.deepEqual(lista[1].inCycles, []);
+  assert.equal(lista[1].type, "legs_push");
+  assert.equal(lista[0].sessions, 2);
+  assert.equal(lista[2].type, "legs_push", "sem plano: ícone sugerido pelo nome");
+  assert.equal(planNames(p)[hack], "Hack Squat");
+});
+
+/* ---------- plano no Drive ---------- */
+const planoComAirBike = () => addExerciseToCycle(emptyPlan("Plano da Edite", 100), "1", { name: "Air Bike" }, 200).plan;
+
+test("sync: o plano vai para gymtrack-plano.csv e um aparelho novo recebe-o", async () => {
+  const d = new FakeDrive();
+  const a = makeApp(d, { plan: planoComAirBike() });
+  await a.sync.syncNow();
+  const f = d.live(PLAN_NAME);
+  assert.equal(f.length, 1);
+  assert.deepEqual(parsePlanCsv(f[0].content), a.state.plan);
+  const b = makeApp(d);
+  await b.sync.syncNow();
+  assert.deepEqual(b.state.plan, a.state.plan);
+  assert.equal(d.updates, 0);
+});
+
+test("sync: sem plano local nem no Drive não cria ficheiro do plano", async () => {
+  const d = new FakeDrive();
+  const a = makeApp(d);
+  await a.sync.syncNow();
+  assert.equal(d.live(PLAN_NAME).length, 0);
+  assert.equal(a.state.plan, null);
+});
+
+test("sync: alterações ao plano propagam-se e o plano mais antigo nunca apaga o mais recente", async () => {
+  const d = new FakeDrive();
+  const a = makeApp(d, { plan: planoComAirBike() });
+  const b = makeApp(d);
+  await a.sync.syncNow();
+  await b.sync.syncNow();
+  b.state.plan = addExerciseToCycle(b.state.plan, "2", { name: "Leg Curl" }, 5000).plan;
+  await b.sync.syncNow();
+  await a.sync.syncNow();
+  assert.equal(a.state.plan.cycles[2].exercises[0].name, "Leg Curl");
+  const velho = emptyPlan("Antigo", 50);                                   // aparelho com plano velho
+  const c = makeApp(d, { plan: velho });
+  await c.sync.syncNow();
+  assert.equal(c.state.plan.cycles[2].exercises[0].name, "Leg Curl", "ganha o do Drive");
+  assert.equal(parsePlanCsv(d.live(PLAN_NAME)[0].content).cycles[2].exercises.length, 1);
+});
+
+test("sync: ficheiro do plano com formato estranho NÃO é sobrescrito", async () => {
+  const d = new FakeDrive();
+  const folder = d.add({ name: FOLDER_NAME, mimeType: "application/vnd.google-apps.folder", parents: ["root"] });
+  const f = d.add({ name: PLAN_NAME, parents: [folder], content: "isto não é um plano\n1,2,3" });
+  const app = makeApp(d, { plan: planoComAirBike() });
+  await app.sync.syncNow();
+  assert.equal(app.last().state, "error");
+  assert.equal(d.files.get(f).content, "isto não é um plano\n1,2,3");
+  assert.equal(d.updates, 0);
+});
+
+test("sync: cópia diária do plano (1 por dia) ao lado da dos registos", async () => {
+  const d = new FakeDrive();
+  const app = makeApp(d, { plan: planoComAirBike(), names: { [AIR]: "Air Bike" } });
+  app.state.logs = setDayEntry({}, AIR, "2026-10-21", [S(5, 5)], {}, 100);
+  await app.sync.syncNow();                                                // cria os dois ficheiros
+  app.state.plan = addExerciseToCycle(app.state.plan, "1", { name: "Leg Curl" }, 9000).plan;
+  app.state.logs = setDayEntry(app.state.logs, AIR, "2026-10-21", [S(6, 6)], {}, 200);
+  await app.sync.syncNow();
+  const bf = d.live("Backups")[0];
+  assert.deepEqual(d.inFolder(bf.id).map((x) => x.name).sort(), ["gymtrack-plano-2026-10-21.csv", "gymtrack-registos-2026-10-21.csv"]);
+  app.state.plan = addExerciseToCycle(app.state.plan, "1", { name: "Remada" }, 9500).plan;
+  await app.sync.syncNow();
+  assert.equal(d.inFolder(bf.id).length, 2, "no mesmo dia não há 2.ª cópia");
 });

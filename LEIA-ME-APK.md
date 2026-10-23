@@ -55,10 +55,32 @@ Depois de confirmada, se a Google ligar outra conta a app mostra «Conta Google 
 
 ---
 
+## 4. Montar o plano e usar o temporizador
+
+- **Primeira vez:** depois de ligares o Drive, a app pergunta «Monta o teu plano»: *Começar em branco* ou *Usar o «Programa de Adaptação»* (modelo com os teus exercícios atuais).
+- **Ciclo → Editar:** ▲ ▼ ordenam; *Retirar do ciclo* (toca duas vezes) tira o exercício só desse ciclo; o campo de texto muda a linha por baixo do nome do ciclo. *Concluir* sai da edição.
+- **+ Adicionar exercício:** mostra os exercícios **com histórico** que não estão neste ciclo (os retirados aparecem como «Retirado») ou deixa criar um novo só com o nome.
+  Ao voltar a acrescentar um exercício retirado, o histórico está todo lá, porque está ligado ao nome.
+- **Temporizador:** barra no fundo de cada ciclo. Toca num tempo (30s, 45s, 1min, 90s, 2min, 3min) para começar; −15/+15 ajustam; Pausa/Continuar; ↺ repõe.
+  O alarme é do Android: toca com o ecrã bloqueado, durante 8 s, com vibração, no volume de **alarme** do telemóvel. «Parar alarme» silencia.
+  **Testa uma vez:** inicia 30s, bloqueia o ecrã e espera. Se não tocar, confirma o volume de alarme e que a app não está «forçada a parar».
+
+## 5. Partilhar a APK com a Edite (ou outra pessoa)
+
+Cada pessoa usa o **seu Gmail** e os dados ficam no **Drive dela** (pasta `GymTrack`, criada pela app; ela não precisa de abrir o Drive).
+Não há nada a configurar na Google Cloud por pessoa, **desde que a app esteja publicada** (passo 1.5). Em modo de teste teria de ser adicionada como utilizadora de teste e a autorização caducaria de 7 em 7 dias.
+
+1. Envia-lhe o `GymTrack.apk` (o link da release, se o repositório for público, ou o ficheiro por WhatsApp/email). Ela instala-o (permitir «fontes desconhecidas»).
+2. Ela abre a app → **Ligar ao Google Drive** → escolhe **o Gmail dela** → **Sim, usar esta**.
+3. **Começar em branco** e monta o plano dela. Nada do teu plano aparece no telemóvel dela e nada dos dados dela vai para o teu Drive.
+4. Se quiseres ver os registos dela: ela partilha contigo a pasta `GymTrack` (Drive → Partilhar).
+
 ## Onde ficam os dados
 - `GymTrack/gymtrack-registos.csv` no teu Drive: uma linha por série
   `data;plano;ciclo;exercicio;serie;peso_kg;reps;atualizado`. Abre no Excel (separador `;`, vírgula decimal).
-- `GymTrack/Backups/`: uma cópia por dia (a anterior à 1.ª alteração do dia), últimas 30.
+- `GymTrack/gymtrack-plano.csv`: o teu plano (3 ciclos, exercícios e ordem; o ciclo 0 guarda os exercícios retirados com histórico).
+  Não o edites à mão: usa a app.
+- `GymTrack/Backups/`: uma cópia por dia de cada ficheiro (a anterior à 1.ª alteração do dia), últimas 30 de cada.
 - No telemóvel há sempre uma cópia local: sem rede continuas a registar e a app envia quando houver rede.
 - O CSV serve para ver, filtrar e fazer gráficos. Para corrigir um registo antigo, pede-me ajuda em vez de editar à mão.
 
@@ -75,4 +97,6 @@ Os registos mantêm-se (estão no Drive). A chave de assinatura tem de ser sempr
 | «Erro de acesso / app bloqueada» ao autorizar | Passos 1.3–1.5: ecrã de consentimento concluído, âmbito `drive.file` e app publicada. |
 | «Conta Google errada» | Ver «Conta errada?» no passo 3. |
 | «Sem rede · guardado no telemóvel» | Normal sem rede: nada se perde; envia sozinho quando houver rede. |
+| O alarme do temporizador não toca | Volume de **alarme** do telemóvel; app não «forçada a parar»; modo «Não incomodar» a bloquear alarmes. |
+| Reinstalei e pede o plano | Normal só se o Drive ainda não tem o plano. Se já tinha, a app mostra «A procurar o teu plano no Drive…» e recupera-o. |
 | «O ficheiro … não tem o formato esperado» | O CSV do Drive foi alterado fora da app. A app não lhe toca; manda-me o ficheiro. |

@@ -6,6 +6,8 @@ export const IS_NATIVE = Capacitor.isNativePlatform();
 
 // Plugin local: native/java/DriveAuthPlugin.java (login Google nativo, âmbito drive.file)
 const DriveAuth = registerPlugin("DriveAuth");
+// Plugin local: native/java/RestAlarmPlugin.java (alarme do temporizador de descanso)
+const RestAlarm = registerPlugin("RestAlarm");
 
 const TOKEN_TTL_MS = 45 * 60 * 1000;   // o token vale ~1 h; renova-se antes
 let token = null;
@@ -57,6 +59,11 @@ export function onBackButton(cb) {
   const h = App.addListener("backButton", () => cb());
   return () => { Promise.resolve(h).then((x) => x.remove()).catch(() => {}); };
 }
+
+// Temporizador: o alarme é do Android (toca com o ecrã bloqueado). Fora da APK não faz nada.
+export const scheduleAlarm = (seconds) => (IS_NATIVE ? RestAlarm.schedule({ seconds }).catch(() => {}) : Promise.resolve());
+export const cancelAlarm = () => (IS_NATIVE ? RestAlarm.cancel().catch(() => {}) : Promise.resolve());
+export const stopAlarm = () => (IS_NATIVE ? RestAlarm.stop().catch(() => {}) : Promise.resolve());
 
 export function exitApp() {
   try { App.exitApp(); } catch (_) { /* ignora */ }

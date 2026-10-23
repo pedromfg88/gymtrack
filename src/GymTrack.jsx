@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Check, Plus, X, ChevronDown, Dumbbell, Flame, TrendingUp, RotateCcw } from "lucide-react";
-import { exerciseKey, localISO, mergeLogsU, liveLogs, setDayEntry, loadLocal, saveLocal, loadAccount, saveAccount, clearAccount, createDrive, createSync } from "./store.mjs";
-import { IS_NATIVE, authorize, dropToken, revokeAndForget, onResume, onBackButton, exitApp } from "./native.js";
+import { exerciseKey, localISO, mergeLogsU, liveLogs, setDayEntry, loadLocal, saveLocal, loadAccount, saveAccount, clearAccount, createDrive, createSync,
+  mergePlan, emptyPlan, planFromTemplate, addExerciseToCycle, removeExerciseFromCycle, moveExercise, setCycleFocus, setPlanLabel, planNames, historyExercises, cleanName } from "./store.mjs";
+import { IS_NATIVE, authorize, dropToken, revokeAndForget, onResume, onBackButton, exitApp, scheduleAlarm, cancelAlarm, stopAlarm } from "./native.js";
 
 /* ============================================================
    DADOS BASE — Planos de treino por período
@@ -89,11 +90,9 @@ const fmtDatePT = (iso) => {
   return d.toLocaleDateString("pt-PT", { day: "2-digit", month: "short" });
 };
 
-// Nomes de todos os exercícios dos planos (para o CSV mostrar sempre o nome certo)
-const PLAN_NAMES = {};
-Object.values(DEFAULT_PLANS).forEach((p) =>
-  Object.values(p.workouts).forEach((w) => w.exercises.forEach((ex) => { PLAN_NAMES[exerciseKey(ex.name)] = ex.name; }))
-);
+// Modelo inicial (o plano real vive nos dados, edita-se na app e sincroniza com o Drive)
+const TEMPLATE_PLAN = DEFAULT_PLANS.plano_2026_06;
+const TEMPLATE_COUNT = Object.values(TEMPLATE_PLAN.workouts).reduce((n, w) => n + w.exercises.length, 0);
 
 const localKv = {
   get: (k) => { try { return localStorage.getItem(k); } catch (_) { return null; } },
@@ -692,7 +691,7 @@ function SyncPill({ sync, account, onTap, onConfirm, onSwitch }) {
   );
 }
 
-function WorkoutSelector({ activePlan, hasArchive, onOpenArchive, onOpenBackup, workouts, logs, onSelect, sync, onSyncTap, account, onConfirmAccount, onSwitchAccount }) {
+function WorkoutSelector({ activePlan, hasArchive, onOpenArchive, onOpenBackup, workouts, logs, onSelect, sync, onSyncTap, account, onConfirmAccount, onSwitchAccount, onRenamePlan }) {
   const weekStart = startOfWeekISO();
 
   return (
@@ -765,8 +764,17 @@ function WorkoutSelector({ activePlan, hasArchive, onOpenArchive, onOpenBackup, 
         </button>
       </div>
 
-      <div style={{ fontSize: 12.5, color: "#5C5E64", marginBottom: 14, fontFamily: "'JetBrains Mono', monospace" }}>
-        Plano atual: {activePlan.label}
+      <div style={{ fontSize: 12.5, color: "#5C5E64", marginBottom: 14, fontFamily: "'JetBrains Mono', monospace", display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
+        <span>Plano atual: {activePlan.label}</span>
+        <button
+          onClick={() => {
+            const v = window.prompt("Nome do plano", activePlan.label);
+            if (v && v.trim()) onRenamePlan(v);
+          }}
+          style={{ background: "transparent", border: "none", color: "#6B6D73", textDecoration: "underline", fontSize: 12, padding: 0, cursor: "pointer" }}
+        >
+          Mudar nome
+        </button>
       </div>
 
       {Object.entries(workouts).map(([key, w]) => {
@@ -813,8 +821,240 @@ function WorkoutSelector({ activePlan, hasArchive, onOpenArchive, onOpenBackup, 
 /* ============================================================
    ECRÃ: Detalhe do ciclo (lista de exercícios)
    ============================================================ */
-function WorkoutDetail({ workout, logs, onBack, onSaveSet, onClearToday, onViewHistory }) {
+/* ============================================================
+   COMPONENTE: Temporizador de descanso
+   Na APK o alarme é do Android (toca mesmo com o ecrã bloqueado ou a app em segundo plano).
+   ============================================================ */
+const TIMER_KEY = "gymtrack-timer";
+const PRESETS = [30, 45, 60, 90, 120, 180];
+const fmtClock = (n) => `${String(Math.floor(n / 60)).padStart(2, "0")}:${String(n % 60).padStart(2, "0")}`;
+const presetLabel = (n) => (n >= 60 && n % 60 === 0 ? `${n / 60}min` : `${n}s`);
+
+function loadTimer() {
+  try {
+    const t = JSON.parse(localStorage.getItem(TIMER_KEY));
+    if (t && t.duration > 0) {
+      const endsAt = t.endsAt || 0;
+      // app reaberta depois do fim: mostra "terminado" (o alarme já tocou)
+      if (endsAt > 0 && Date.now() >= endsAt) return { duration: t.duration, endsAt: 0, pausedLeft: 0, doneAt: endsAt };
+      return { duration: t.duration, endsAt, pausedLeft: t.pausedLeft || 0, doneAt: t.doneAt || 0 };
+    }
+  } catch (_) { /* usa o valor por defeito */ }
+  return { duration: 90, endsAt: 0, pausedLeft: 0, doneAt: 0 };
+}
+
+function beepWeb() {   // só fora da APK (browser); na APK toca o alarme do Android
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AC();
+    [0, 0.35, 0.7].forEach((d) => {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.frequency.value = 880;
+      g.gain.value = 0.25;
+      o.connect(g);
+      g.connect(ctx.destination);
+      o.start(ctx.currentTime + d);
+      o.stop(ctx.currentTime + d + 0.25);
+    });
+    if (navigator.vibrate) navigator.vibrate([300, 150, 300]);
+  } catch (_) { /* sem som */ }
+}
+
+function RestTimer({ color }) {
+  const [t, setT] = useState(loadTimer);
+  const [now, setNow] = useState(Date.now());
+  const running = t.endsAt > 0;
+  const paused = !running && t.pausedLeft > 0;
+  const done = t.doneAt > 0;
+  const left = running ? Math.max(0, Math.ceil((t.endsAt - now) / 1000)) : paused ? t.pausedLeft : done ? 0 : t.duration;
+
+  useEffect(() => { try { localStorage.setItem(TIMER_KEY, JSON.stringify(t)); } catch (_) { /* ignora */ } }, [t]);
+  useEffect(() => {
+    if (!running) return undefined;
+    const iv = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(iv);
+  }, [running]);
+  useEffect(() => {
+    if (running && now >= t.endsAt) {
+      setT((p) => ({ ...p, endsAt: 0, pausedLeft: 0, doneAt: p.endsAt }));
+      if (!IS_NATIVE) beepWeb();
+    }
+  }, [now, running, t.endsAt]);
+
+  const start = (sec) => {
+    const at = Date.now();
+    setNow(at);
+    setT({ duration: sec, endsAt: at + sec * 1000, pausedLeft: 0, doneAt: 0 });
+    scheduleAlarm(sec);
+  };
+  const toggle = () => {
+    const at = Date.now();
+    if (running) {
+      setT({ ...t, endsAt: 0, pausedLeft: Math.max(1, Math.ceil((t.endsAt - at) / 1000)) });
+      cancelAlarm();
+    } else if (paused) {
+      setNow(at);
+      setT({ ...t, endsAt: at + t.pausedLeft * 1000, pausedLeft: 0 });
+      scheduleAlarm(t.pausedLeft);
+    } else start(t.duration);
+  };
+  const adjust = (delta) => {
+    const at = Date.now();
+    if (running) {
+      const endsAt = Math.max(at + 1000, t.endsAt + delta * 1000);
+      setT({ ...t, endsAt });
+      scheduleAlarm(Math.ceil((endsAt - at) / 1000));
+    } else if (paused) setT({ ...t, pausedLeft: Math.max(5, t.pausedLeft + delta) });
+    else setT({ ...t, duration: Math.min(3600, Math.max(5, t.duration + delta)), doneAt: 0 });
+  };
+  const reset = () => { cancelAlarm(); setT({ duration: t.duration, endsAt: 0, pausedLeft: 0, doneAt: 0 }); };
+  const stop = () => { stopAlarm(); setT({ duration: t.duration, endsAt: 0, pausedLeft: 0, doneAt: 0 }); };
+
+  const btn = { padding: "9px 12px", borderRadius: 10, border: "1px solid #2A2C32", background: "#1A1C1F", color: "#C7C8CC", fontSize: 13, fontWeight: 700, cursor: "pointer" };
+  return (
+    <div
+      aria-label="Temporizador de descanso"
+      style={{
+        position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 40, background: "#111214F5",
+        borderTop: `1px solid ${done ? color : "#24262B"}`, padding: "10px 14px calc(10px + var(--sab, 0px))",
+      }}
+    >
+      <div style={{ maxWidth: 480, margin: "0 auto" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div>
+            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 30, fontWeight: 700, lineHeight: 1, color: done ? color : running ? "#EDEDED" : "#8B8D93" }}>
+              {fmtClock(left)}
+            </div>
+            <div style={{ fontSize: 11, color: done ? color : "#5C5E64", marginTop: 3, fontFamily: "'JetBrains Mono', monospace" }}>
+              {done ? "Descanso terminado" : running ? "A descansar" : paused ? "Em pausa" : "Descanso"}
+            </div>
+          </div>
+          <div style={{ flex: 1, display: "flex", gap: 6, justifyContent: "flex-end", flexWrap: "wrap" }}>
+            {done ? (
+              <button onClick={stop} style={{ ...btn, background: color, border: "none", color: "#0E0F11" }}>Parar alarme</button>
+            ) : (
+              <>
+                <button onClick={() => adjust(-15)} style={btn} aria-label="Menos 15 segundos">−15</button>
+                <button onClick={toggle} style={{ ...btn, background: color, border: "none", color: "#0E0F11" }}>{running ? "Pausa" : paused ? "Continuar" : "Iniciar"}</button>
+                <button onClick={() => adjust(15)} style={btn} aria-label="Mais 15 segundos">+15</button>
+                <button onClick={reset} style={btn} aria-label="Repor temporizador">↺</button>
+              </>
+            )}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 6, marginTop: 9, overflowX: "auto" }}>
+          {PRESETS.map((n) => (
+            <button key={n} onClick={() => start(n)} aria-label={`Descanso de ${presetLabel(n)}`}
+              style={{ ...btn, padding: "6px 11px", fontSize: 12, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0, color: t.duration === n && !done ? color : "#8B8D93", borderColor: t.duration === n && !done ? `${color}66` : "#2A2C32" }}>
+              {presetLabel(n)}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   COMPONENTES: Montar o plano (início, adicionar exercício)
+   ============================================================ */
+function PlanStart({ onPick }) {
+  const card = { display: "block", width: "100%", textAlign: "left", background: "#1A1C1F", border: "1px solid #24262B", borderRadius: 16, padding: "16px 18px", marginBottom: 12, cursor: "pointer", color: "#EDEDED" };
+  return (
+    <div style={{ marginTop: 18 }}>
+      <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 34, fontWeight: 800, color: "#EDEDED", textTransform: "uppercase", lineHeight: 1.05 }}>Monta o teu plano</div>
+      <div style={{ color: "#8B8D93", fontSize: 13.5, lineHeight: 1.5, margin: "8px 0 18px" }}>
+        Três ciclos. Podes retirar e acrescentar exercícios quando quiseres: o histórico fica sempre guardado.
+      </div>
+      <button onClick={() => onPick("blank")} style={card}>
+        <div style={{ fontSize: 16, fontWeight: 700 }}>Começar em branco</div>
+        <div style={{ fontSize: 12.5, color: "#8B8D93", marginTop: 4 }}>3 ciclos vazios; acrescentas os exercícios que quiseres.</div>
+      </button>
+      <button onClick={() => onPick("template")} style={card}>
+        <div style={{ fontSize: 16, fontWeight: 700 }}>Usar o «Programa de Adaptação»</div>
+        <div style={{ fontSize: 12.5, color: "#8B8D93", marginTop: 4 }}>Os 3 ciclos do modelo, com {TEMPLATE_COUNT} exercícios. Depois ajustas à tua maneira.</div>
+      </button>
+    </div>
+  );
+}
+
+function AddExerciseSheet({ cycleName, color, items, onPick, onNew, onClose }) {
+  const [name, setName] = useState("");
+  const [error, setError] = useState("");
+  const submit = () => {
+    const err = onNew(name);
+    if (err) setError(err);
+    else onClose();
+  };
+  const pick = (it) => {
+    const err = onPick(it);
+    if (err) setError(err);
+    else onClose();
+  };
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(0,0,0,0.72)", display: "flex", alignItems: "flex-end" }}>
+      <div
+        role="dialog"
+        aria-label="Adicionar exercício"
+        onClick={(e) => e.stopPropagation()}
+        style={{ width: "100%", maxHeight: "86vh", overflowY: "auto", background: "#15161A", borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "18px 16px calc(24px + var(--sab, 0px))", maxWidth: 480, margin: "0 auto" }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 24, fontWeight: 800, textTransform: "uppercase", color }}>Adicionar ao {cycleName}</div>
+          <button onClick={onClose} aria-label="Fechar" style={{ background: "transparent", border: "none", color: "#8B8D93", cursor: "pointer", padding: 6 }}><X size={20} /></button>
+        </div>
+
+        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, letterSpacing: "0.08em", color: "#8B8D93", textTransform: "uppercase", marginBottom: 8 }}>Exercícios com histórico</div>
+        {items.length === 0 ? (
+          <div style={{ color: "#5C5E64", fontSize: 13, marginBottom: 14 }}>Ainda não há exercícios com histórico fora deste ciclo.</div>
+        ) : (
+          <div style={{ marginBottom: 16 }}>
+            {items.map((it) => (
+              <button key={it.key} onClick={() => pick(it)} aria-label={`Acrescentar ${it.name}`}
+                style={{ display: "flex", alignItems: "center", gap: 12, width: "100%", textAlign: "left", background: "#1A1C1F", border: "1px solid #24262B", borderRadius: 12, padding: "10px 12px", marginBottom: 8, cursor: "pointer", color: "#EDEDED" }}>
+                <ExerciseIcon type={it.type} color={color} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14.5, fontWeight: 600 }}>{it.name}</div>
+                  <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, color: "#6B6D73", marginTop: 2 }}>
+                    {it.sessions} {it.sessions === 1 ? "sessão" : "sessões"} · última {fmtDatePT(it.last)}
+                  </div>
+                </div>
+                <span style={{ fontSize: 11, color: it.inCycles.length ? "#8B8D93" : color, border: `1px solid ${it.inCycles.length ? "#2A2C32" : `${color}55`}`, borderRadius: 999, padding: "3px 8px", flexShrink: 0 }}>
+                  {it.inCycles.length ? `Ciclo ${it.inCycles.join(", ")}` : "Retirado"}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5, letterSpacing: "0.08em", color: "#8B8D93", textTransform: "uppercase", marginBottom: 8 }}>Novo exercício</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input
+            value={name}
+            onChange={(e) => { setName(e.target.value); setError(""); }}
+            onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+            placeholder="Nome do exercício"
+            aria-label="Nome do novo exercício"
+            style={{ flex: 1, minWidth: 0, background: "#0E0F11", border: "1px solid #2A2C32", borderRadius: 10, padding: "12px 12px", color: "#EDEDED", fontSize: 15, outline: "none" }}
+          />
+          <button onClick={submit} style={{ padding: "0 16px", borderRadius: 10, border: "none", background: color, color: "#0E0F11", fontWeight: 800, fontSize: 14, cursor: "pointer" }}>Adicionar</button>
+        </div>
+        {error && <div style={{ color: "#FF6B5B", fontSize: 12.5, marginTop: 8 }}>{error}</div>}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   ECRÃ: Detalhe do ciclo (lista de exercícios; "Editar" para retirar/ordenar)
+   ============================================================ */
+function WorkoutDetail({ workout, logs, onBack, onSaveSet, onClearToday, onViewHistory, onRemove, onMove, onSetFocus, onAdd, getHistory, onOverlay }) {
   const [openId, setOpenId] = useState(null);
+  const [edit, setEdit] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [confirmKey, setConfirmKey] = useState(null);
+  const [focusDraft, setFocusDraft] = useState(workout.focus || "");
   const today = todayISO();
   const weekStart = startOfWeekISO();
   const total = workout.exercises.length;
@@ -824,19 +1064,55 @@ function WorkoutDetail({ workout, logs, onBack, onSaveSet, onClearToday, onViewH
     )
   ).length;
 
+  useEffect(() => {
+    onOverlay(adding ? () => setAdding(false) : null);
+    return () => onOverlay(null);
+  }, [adding, onOverlay]);
+  useEffect(() => {
+    if (!confirmKey) return undefined;
+    const id = setTimeout(() => setConfirmKey(null), 4000);
+    return () => clearTimeout(id);
+  }, [confirmKey]);
+
+  const pill = { padding: "7px 12px", borderRadius: 10, border: "1px solid #24262B", background: "#1A1C1F", color: "#8B8D93", fontSize: 12, fontWeight: 600, cursor: "pointer" };
+  const mini = { padding: "6px 10px", borderRadius: 8, border: "1px solid #24262B", background: "#15161A", color: "#8B8D93", fontSize: 12, fontWeight: 600, cursor: "pointer" };
+
   return (
-    <div style={{ padding: "0 16px 32px" }}>
-      <button onClick={onBack} style={{ background: "transparent", border: "none", color: "#8B8D93", fontSize: 14, fontWeight: 600, padding: "16px 0", cursor: "pointer" }}>
-        ← Ciclos
-      </button>
+    <div style={{ padding: "0 16px 190px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <button onClick={onBack} style={{ background: "transparent", border: "none", color: "#8B8D93", fontSize: 14, fontWeight: 600, padding: "16px 0", cursor: "pointer" }}>
+          ← Ciclos
+        </button>
+        <button onClick={() => { setEdit(!edit); setConfirmKey(null); setFocusDraft(workout.focus || ""); }} aria-label="Editar ciclo" style={{ ...pill, color: edit ? workout.color : "#8B8D93", borderColor: edit ? `${workout.color}66` : "#24262B" }}>
+          {edit ? "Concluir" : "Editar"}
+        </button>
+      </div>
 
       <div style={{ marginBottom: 20 }}>
         <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 30, fontWeight: 800, color: workout.color, textTransform: "uppercase", lineHeight: 1 }}>
           {workout.name}
         </div>
-        <div style={{ fontSize: 13.5, color: "#8B8D93", marginTop: 4, marginBottom: 16 }}>{workout.focus}</div>
+        {edit ? (
+          <input
+            value={focusDraft}
+            onChange={(e) => setFocusDraft(e.target.value)}
+            onBlur={() => onSetFocus(focusDraft)}
+            onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+            placeholder="Texto por baixo do nome (ex.: Pernas e glúteos)"
+            aria-label="Texto do ciclo"
+            style={{ width: "100%", marginTop: 8, marginBottom: 16, background: "#0E0F11", border: "1px solid #2A2C32", borderRadius: 10, padding: "10px 12px", color: "#EDEDED", fontSize: 14, outline: "none" }}
+          />
+        ) : (
+          <div style={{ fontSize: 13.5, color: "#8B8D93", marginTop: 4, marginBottom: 16, minHeight: 4 }}>{workout.focus}</div>
+        )}
         <LoadBar done={done} total={total} color={workout.color} />
       </div>
+
+      {total === 0 && (
+        <div style={{ border: "1px dashed #2A2C32", borderRadius: 14, padding: "18px 16px", color: "#6B6D73", fontSize: 13.5, lineHeight: 1.5, marginBottom: 12 }}>
+          Este ciclo ainda não tem exercícios. Toca em «Adicionar exercício».
+        </div>
+      )}
 
       {workout.exercises.map((ex) => {
         const key = exerciseKey(ex.name);
@@ -860,14 +1136,46 @@ function WorkoutDetail({ workout, logs, onBack, onSaveSet, onClearToday, onViewH
             {openId === key && log.length > 0 && (
               <button
                 onClick={() => onViewHistory(ex)}
-                style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none", color: "#6B6D73", fontSize: 12.5, fontWeight: 600, margin: "-4px 0 14px 4px", cursor: "pointer" }}
+                style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none", color: "#6B6D73", fontSize: 12.5, fontWeight: 600, marginBottom: 10, padding: "2px 4px", cursor: "pointer" }}
               >
                 <TrendingUp size={13} /> Ver histórico completo
               </button>
             )}
+            {edit && (
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", margin: "-2px 0 12px" }}>
+                <button onClick={() => onMove(key, -1)} aria-label={`Subir ${ex.name}`} style={mini}>▲</button>
+                <button onClick={() => onMove(key, 1)} aria-label={`Descer ${ex.name}`} style={mini}>▼</button>
+                <button
+                  onClick={() => { if (confirmKey === key) { setConfirmKey(null); onRemove(key); } else setConfirmKey(key); }}
+                  aria-label={`Retirar ${ex.name} do ciclo`}
+                  style={{ ...mini, color: confirmKey === key ? "#FF6B5B" : "#8B8D93", borderColor: confirmKey === key ? "#FF6B5B66" : "#24262B" }}
+                >
+                  {confirmKey === key ? "Confirmar: retirar do ciclo" : "Retirar do ciclo"}
+                </button>
+              </div>
+            )}
           </div>
         );
       })}
+
+      <button
+        onClick={() => setAdding(true)}
+        style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, width: "100%", marginTop: 6, padding: "14px 16px", borderRadius: 14, border: `1px dashed ${workout.color}77`, background: "transparent", color: workout.color, fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}
+      >
+        <Plus size={16} /> Adicionar exercício
+      </button>
+      {edit && <div style={{ color: "#5C5E64", fontSize: 12, marginTop: 10, lineHeight: 1.5 }}>Retirar um exercício só o tira deste ciclo: o histórico fica guardado e podes voltar a acrescentá-lo.</div>}
+
+      {adding && (
+        <AddExerciseSheet
+          cycleName={workout.name}
+          color={workout.color}
+          items={getHistory()}
+          onPick={(it) => onAdd(it.name, it.type)}
+          onNew={(n) => onAdd(n)}
+          onClose={() => setAdding(false)}
+        />
+      )}
     </div>
   );
 }
@@ -1012,6 +1320,17 @@ function BackupView({ logs, onBack, onImport }) {
 /* ============================================================
    APP RAIZ
    ============================================================ */
+const GLOBAL_CSS = `
+  * { box-sizing: border-box; }
+  body { margin: 0; }
+  input[type=number]::-webkit-inner-spin-button,
+  input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  input:focus { border-color: #C8FF3D !important; }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+`;
+
 export default function GymApp() {
   const [data, setData] = useState(null);
   const [view, setView] = useState({ screen: "home" });
@@ -1024,6 +1343,8 @@ export default function GymApp() {
   const syncRef = useRef(null);
   const viewRef = useRef(view);
   viewRef.current = view;
+  const overlayRef = useRef(null);
+  const setOverlay = useCallback((fn) => { overlayRef.current = fn; }, []);
 
   // guarda no telemóvel (sempre) e atualiza o ecrã
   const commit = useCallback((next) => {
@@ -1034,7 +1355,7 @@ export default function GymApp() {
 
   useEffect(() => {
     const local = loadLocal();
-    const first = { plans: DEFAULT_PLANS, logs: local.logs, names: local.names };
+    const first = { logs: local.logs, names: local.names, plan: local.plan };
     dataRef.current = first;
     setData(first);
     setLoaded(true);
@@ -1042,10 +1363,10 @@ export default function GymApp() {
 
     const syncer = createSync({
       drive: createDrive({ getToken: () => authorize(false), onBadToken: dropToken }),
-      getLocal: () => ({ logs: dataRef.current.logs, names: { ...dataRef.current.names, ...PLAN_NAMES } }),
-      applyRemote: ({ logs, names }) => {
+      getLocal: () => ({ logs: dataRef.current.logs, names: { ...dataRef.current.names, ...planNames(dataRef.current.plan) }, plan: dataRef.current.plan }),
+      applyRemote: ({ logs, names, plan }) => {
         const cur = dataRef.current;
-        commit({ ...cur, logs: mergeLogsU(cur.logs, logs), names: { ...names, ...cur.names } });
+        commit({ ...cur, logs: mergeLogsU(cur.logs, logs), names: { ...names, ...cur.names }, plan: mergePlan(cur.plan, plan) });
       },
       setStatus: setSync,
       kv: localKv,
@@ -1064,6 +1385,7 @@ export default function GymApp() {
   useEffect(
     () =>
       onBackButton(() => {
+        if (overlayRef.current) { overlayRef.current(); return; }
         const v = viewRef.current;
         if (v.screen === "home") exitApp();
         else if (v.screen === "history")
@@ -1075,6 +1397,11 @@ export default function GymApp() {
   );
 
   const live = useMemo(() => liveLogs(data ? data.logs : {}), [data]);
+  // formato que o resto da interface já conhece: um único plano, sempre ativo
+  const plansView = useMemo(
+    () => (data && data.plan ? { atual: { label: data.plan.label, active: true, workouts: data.plan.cycles } } : null),
+    [data]
+  );
 
   const persist = (next) => {
     commit(next);
@@ -1124,11 +1451,57 @@ export default function GymApp() {
     );
   }
 
-  const planEntries0 = Object.entries(data.plans);
-  const activeEntry0 = planEntries0.find(([, p]) => p.active) || planEntries0[0];
+  const handleStartPlan = (kind) => {
+    persist({ ...data, plan: kind === "template" ? planFromTemplate(TEMPLATE_PLAN, "Programa de Adaptação") : emptyPlan("O meu plano") });
+  };
+
+  // Sem plano ainda: primeiro vê-se se já existe no Drive (reinstalação); só depois se oferece o início
+  if (!data.plan) {
+    const ready = !IS_NATIVE || sync.state === "ok";
+    return (
+      <div style={{ minHeight: "calc(100vh - var(--sat, 0px) - var(--sab, 0px))", background: "#0E0F11", fontFamily: "'Inter', -apple-system, sans-serif" }}>
+        <style>{GLOBAL_CSS}</style>
+        <div style={{ maxWidth: 480, margin: "0 auto", padding: "28px 16px 32px" }}>
+          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, letterSpacing: "0.14em", color: "#C8FF3D", textTransform: "uppercase" }}>GymTrack</div>
+          {IS_NATIVE && <SyncPill sync={sync} account={account} onTap={handleSyncTap} onConfirm={handleConfirmAccount} onSwitch={handleSwitchAccount} />}
+          {ready ? (
+            <PlanStart onPick={handleStartPlan} />
+          ) : (
+            <div style={{ color: "#8B8D93", fontSize: 13.5, lineHeight: 1.5, marginTop: 18 }}>
+              {sync.state === "offline" ? "Sem rede. Na primeira vez precisas de rede para ir buscar o teu plano ao Drive." : "A procurar o teu plano no Drive…"}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   const metaFor = (cycleKey) => {
-    const w = activeEntry0[1].workouts[cycleKey];
-    return { p: activeEntry0[1].label, c: w ? w.name : "" };
+    const c = data.plan.cycles[cycleKey];
+    return { p: data.plan.label, c: c ? c.name : "" };
+  };
+
+  const hasHistory = (key) => !!(live[key] && live[key].length);
+  // devolve "" se correu bem, ou a mensagem de erro
+  const handleAddExercise = (cycleId, rawName, type) => {
+    const known = data.names[exerciseKey(cleanName(rawName))];   // se já há histórico com este nome, usa o nome que lá está
+    const r = addExerciseToCycle(data.plan, cycleId, { name: known || rawName, type });
+    if (r.error) return r.error;
+    persist({ ...data, plan: r.plan, names: { ...data.names, [r.key]: known || cleanName(rawName) } });
+    return "";
+  };
+  const handleRemoveExercise = (cycleId, key) => persist({ ...data, plan: removeExerciseFromCycle(data.plan, cycleId, key, hasHistory(key)) });
+  const handleMoveExercise = (cycleId, key, delta) => {
+    const plan = moveExercise(data.plan, cycleId, key, delta);
+    if (plan !== data.plan) persist({ ...data, plan });
+  };
+  const handleSetFocus = (cycleId, text) => {
+    const plan = setCycleFocus(data.plan, cycleId, text);
+    if (plan !== data.plan) persist({ ...data, plan });
+  };
+  const handleRenamePlan = (label) => {
+    const plan = setPlanLabel(data.plan, label);
+    if (plan !== data.plan) persist({ ...data, plan });
   };
 
   const handleSaveSet = (exerciseId, sets, name) => {
@@ -1147,23 +1520,14 @@ export default function GymApp() {
     persist({ ...data, logs: mergeLogsU(data.logs, stamped) });
   };
 
-  const planEntries = Object.entries(data.plans);
+  const planEntries = Object.entries(plansView);
   const activeEntry = planEntries.find(([, p]) => p.active) || planEntries[0];
   const activePlan = activeEntry[1];
   const archivedEntries = planEntries.filter(([id]) => id !== activeEntry[0]);
 
   return (
     <div style={{ minHeight: "calc(100vh - var(--sat, 0px) - var(--sab, 0px))", background: "#0E0F11", fontFamily: "'Inter', -apple-system, sans-serif" }}>
-      <style>{`
-        * { box-sizing: border-box; }
-        body { margin: 0; }
-        input[type=number]::-webkit-inner-spin-button,
-        input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
-        input:focus { border-color: #C8FF3D !important; }
-        @media (prefers-reduced-motion: reduce) {
-          * { transition: none !important; }
-        }
-      `}</style>
+      <style>{GLOBAL_CSS}</style>
 
       <div style={{ maxWidth: 480, margin: "0 auto" }}>
         {view.screen === "backup" && (
@@ -1188,18 +1552,29 @@ export default function GymApp() {
             account={account}
             onConfirmAccount={handleConfirmAccount}
             onSwitchAccount={handleSwitchAccount}
+            onRenamePlan={handleRenamePlan}
           />
         )}
 
-        {view.screen === "workout" && (
-          <WorkoutDetail
-            workout={activePlan.workouts[view.key]}
-            logs={live}
-            onBack={() => setView({ screen: "home" })}
-            onSaveSet={handleSaveSet}
-            onClearToday={handleClearToday}
-            onViewHistory={(ex) => setView({ screen: "history", from: "home", key: view.key, exercise: ex, color: activePlan.workouts[view.key].color })}
-          />
+        {view.screen === "workout" && activePlan.workouts[view.key] && (
+          <>
+            <WorkoutDetail
+              key={view.key}
+              workout={activePlan.workouts[view.key]}
+              logs={live}
+              onBack={() => setView({ screen: "home" })}
+              onSaveSet={handleSaveSet}
+              onClearToday={handleClearToday}
+              onViewHistory={(ex) => setView({ screen: "history", from: "home", key: view.key, exercise: ex, color: activePlan.workouts[view.key].color })}
+              onRemove={(key) => handleRemoveExercise(view.key, key)}
+              onMove={(key, d) => handleMoveExercise(view.key, key, d)}
+              onSetFocus={(text) => handleSetFocus(view.key, text)}
+              onAdd={(name, type) => handleAddExercise(view.key, name, type)}
+              getHistory={() => historyExercises({ logs: data.logs, names: data.names, plan: data.plan }, view.key)}
+              onOverlay={setOverlay}
+            />
+            <RestTimer color={activePlan.workouts[view.key].color} />
+          </>
         )}
 
         {view.screen === "archive" && (
@@ -1213,7 +1588,7 @@ export default function GymApp() {
 
         {view.screen === "archived-workout" && (
           <ArchivedWorkoutDetail
-            workout={data.plans[view.planId].workouts[view.key]}
+            workout={plansView[view.planId].workouts[view.key]}
             logs={live}
             onBack={() => setView({ screen: "archive" })}
             onViewHistory={(ex) =>
@@ -1223,7 +1598,7 @@ export default function GymApp() {
                 planId: view.planId,
                 key: view.key,
                 exercise: ex,
-                color: data.plans[view.planId].workouts[view.key].color,
+                color: plansView[view.planId].workouts[view.key].color,
               })
             }
           />

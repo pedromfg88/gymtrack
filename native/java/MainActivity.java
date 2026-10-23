@@ -9,6 +9,7 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         // Plugins locais têm de ser registados ANTES do super.onCreate()
         registerPlugin(DriveAuthPlugin.class);
+        registerPlugin(RestAlarmPlugin.class);
         super.onCreate(savedInstanceState);
     }
 }

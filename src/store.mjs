@@ -7,6 +7,9 @@
 export const FOLDER_NAME = "GymTrack";
 export const BACKUP_FOLDER_NAME = "Backups";
 export const CSV_NAME = "gymtrack-registos.csv";
+export const PLAN_NAME = "gymtrack-plano.csv";
+export const CYCLE_IDS = ["1", "2", "3"];
+const CYCLE_COLORS = { 1: "#C8FF3D", 2: "#3DD9FF", 3: "#FF8A3D" };
 export const LOCAL_KEY = "gymtrack-data";
 export const ACCOUNT_KEY = "gymtrack-account";
 const BACKUP_KEEP = 30;
@@ -72,6 +75,8 @@ export function logsToCsv(logs, names = {}) {
   return BOM + lines.join("\r\n") + "\r\n";
 }
 
+const detectSep = (line) => [";", ",", "\t"].map((c) => [c, line.split(c).length - 1]).sort((a, b) => b[1] - a[1])[0][0];
+
 function splitTable(text, sep) {
   const rows = [];
   let row = [];
@@ -121,9 +126,7 @@ const parseStamp = (s) => { const t = Date.parse(s); return Number.isNaN(t) ? 0 
 export function parseCsv(text) {
   const src = String(text || "").replace(/^\uFEFF/, "");
   if (!src.trim()) return { logs: {}, names: {}, skipped: 0 };
-  const firstLine = src.split(/\r?\n/, 1)[0];
-  const sep = [";", ",", "\t"].map((c) => [c, firstLine.split(c).length - 1]).sort((a, b) => b[1] - a[1])[0][0];
-  const table = splitTable(src, sep);
+  const table = splitTable(src, detectSep(src.split(/\r?\n/, 1)[0]));
   const idx = {};
   table[0].forEach((h, i) => {
     const k = ALIASES[exerciseKey(h)];
@@ -168,6 +171,222 @@ export function parseCsv(text) {
   }
   for (const k of Object.keys(logs)) logs[k].sort((a, b) => cmp(a.date, b.date));
   return { logs, names, skipped };
+}
+
+
+/* ---------- Plano de treino (3 ciclos, editável na app) ----------
+   plan = { label, u, cycles: { "1": { name, focus, color, exercises: [{ name, type }] }, "2", "3" },
+            library: [{ name, type }] }       <- exercícios retirados que têm histórico (guardam o ícone)
+   u = hora da última alteração. O histórico NÃO está aqui: está nos registos, ligado ao NOME do exercício. */
+
+export const cleanName = (s) => String(s == null ? "" : s).replace(/\s+/g, " ").trim();
+const stampPlan = (now, prev) => Math.max(now, (prev || 0) + 1);
+const deaccent = (s) => String(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+// Ícone sugerido pelo nome (só estético; o utilizador só escreve o nome)
+const TYPE_RULES = [
+  [/passadeira|bicicleta|\bbike\b|corrida|eliptic|cardio|caminhada|esteira|spinning|stepper|remo erg/, "cardio"],
+  [/leg extension|extensora|extensao de pernas/, "legs_extend"],
+  [/leg curl|flexora|flexao de pernas|femoral/, "legs_curl"],
+  [/adutor|adductor/, "legs_adductor"],
+  [/abdutor|abductor/, "legs_abductor"],
+  [/gemeos|panturrilha|\bcalf\b/, "calf"],
+  [/stiff|terra\b|deadlift|good morning|hip thrust|gluteo|ponte/, "hinge"],
+  [/agacha|squat|prensa|leg press|hack|afundo|lunge|passada|step up|bulgaro/, "legs_push"],
+  [/rear|posterior|reverse fly|face pull/, "fly_rear"],
+  [/\bfly\b|peck|crucifixo|abertura|voador/, "fly"],
+  [/puxada|pulldown|pull down|pull-up|pull up|barra fixa|dorsal/, "pull_down"],
+  [/remada|\brow\b|serrote|\bpull\b/, "pull"],
+  [/supino|chest|peito|flexoes|push-up|push up|paralelas|\bdips\b/, "press_chest"],
+  [/ombro|shoulder|militar|desenvolvimento|overhead|triceps|frances|pushdown/, "press_shoulder"],
+  [/elevac|lateral raise|\braise\b|encolhimento/, "raise"],
+  [/biceps|rosca|\bcurl\b|martelo/, "curl"],
+  [/abdominal|prancha|plank|crunch|\bcore\b|lombar/, "core"],
+];
+export function guessType(name) {
+  const n = deaccent(name);
+  for (const [re, type] of TYPE_RULES) if (re.test(n)) return type;
+  return "core";
+}
+
+export function emptyPlan(label = "O meu plano", now = Date.now()) {
+  const cycles = {};
+  for (const id of CYCLE_IDS) cycles[id] = { name: `Ciclo ${id}`, focus: "", color: CYCLE_COLORS[id], exercises: [] };
+  return { label, u: now, cycles, library: [] };
+}
+
+// Converte um plano "modelo" ({label, workouts}) para o formato editável
+export function planFromTemplate(tpl, label, now = Date.now()) {
+  const plan = emptyPlan(label || tpl.label, now);
+  for (const id of CYCLE_IDS) {
+    const w = tpl.workouts[id];
+    if (!w) continue;
+    plan.cycles[id] = { name: w.name, focus: w.focus || "", color: w.color || CYCLE_COLORS[id], exercises: w.exercises.map((e) => ({ name: e.name, type: e.type })) };
+  }
+  return plan;
+}
+
+const inCycle = (c, key) => c.exercises.some((e) => exerciseKey(e.name) === key);
+
+export function addExerciseToCycle(plan, cycleId, ex, now = Date.now()) {
+  const name = cleanName(ex && ex.name);
+  const key = exerciseKey(name);
+  const cycle = plan.cycles[cycleId];
+  if (!cycle) return { plan, error: "Esse ciclo não existe." };
+  if (!key) return { plan, error: "Escreve o nome do exercício." };
+  if (inCycle(cycle, key)) return { plan, error: "Esse exercício já está neste ciclo." };
+  const fromLib = (plan.library || []).find((e) => exerciseKey(e.name) === key);
+  const type = (ex && ex.type) || (fromLib && fromLib.type) || guessType(name);
+  return {
+    plan: {
+      ...plan,
+      u: stampPlan(now, plan.u),
+      cycles: { ...plan.cycles, [cycleId]: { ...cycle, exercises: [...cycle.exercises, { name, type }] } },
+      library: (plan.library || []).filter((e) => exerciseKey(e.name) !== key),
+    },
+    key,
+  };
+}
+
+// Retira o exercício DESTE ciclo. O histórico não se toca; se tinha histórico e já não está em nenhum
+// ciclo, fica na "biblioteca" para poder voltar mais tarde (com o mesmo ícone).
+export function removeExerciseFromCycle(plan, cycleId, key, hasHistory, now = Date.now()) {
+  const cycle = plan.cycles[cycleId];
+  const ex = cycle && cycle.exercises.find((e) => exerciseKey(e.name) === key);
+  if (!ex) return plan;
+  const exercises = cycle.exercises.filter((e) => e !== ex);
+  const elsewhere = CYCLE_IDS.some((id) => (id === cycleId ? exercises : plan.cycles[id].exercises).some((e) => exerciseKey(e.name) === key));
+  let library = plan.library || [];
+  if (hasHistory && !elsewhere && !library.some((e) => exerciseKey(e.name) === key)) library = [...library, { name: ex.name, type: ex.type }];
+  return { ...plan, u: stampPlan(now, plan.u), cycles: { ...plan.cycles, [cycleId]: { ...cycle, exercises } }, library };
+}
+
+export function moveExercise(plan, cycleId, key, delta, now = Date.now()) {
+  const cycle = plan.cycles[cycleId];
+  const i = cycle ? cycle.exercises.findIndex((e) => exerciseKey(e.name) === key) : -1;
+  const j = i + delta;
+  if (i < 0 || j < 0 || j >= cycle.exercises.length) return plan;
+  const exercises = [...cycle.exercises];
+  [exercises[i], exercises[j]] = [exercises[j], exercises[i]];
+  return { ...plan, u: stampPlan(now, plan.u), cycles: { ...plan.cycles, [cycleId]: { ...cycle, exercises } } };
+}
+
+export function setCycleFocus(plan, cycleId, focus, now = Date.now()) {
+  const cycle = plan.cycles[cycleId];
+  if (!cycle || cycle.focus === cleanName(focus)) return plan;
+  return { ...plan, u: stampPlan(now, plan.u), cycles: { ...plan.cycles, [cycleId]: { ...cycle, focus: cleanName(focus) } } };
+}
+
+export function setPlanLabel(plan, label, now = Date.now()) {
+  const l = cleanName(label);
+  if (!l || l === plan.label) return plan;
+  return { ...plan, u: stampPlan(now, plan.u), label: l };
+}
+
+// chave -> nome de todos os exercícios do plano (ciclos + biblioteca)
+export function planNames(plan) {
+  const out = {};
+  if (!plan) return out;
+  for (const id of CYCLE_IDS) for (const e of plan.cycles[id].exercises) out[exerciseKey(e.name)] = e.name;
+  for (const e of plan.library || []) out[exerciseKey(e.name)] = e.name;
+  return out;
+}
+
+// Exercícios com histórico que se podem acrescentar a um ciclo (os que já lá estão ficam de fora)
+export function historyExercises({ logs, names, plan }, cycleId) {
+  const known = planNames(plan);
+  const out = [];
+  for (const [key, entries] of Object.entries(logs || {})) {
+    const live = (entries || []).filter((e) => e.sets && e.sets.length > 0);
+    if (!live.length) continue;
+    if (plan && plan.cycles[cycleId] && inCycle(plan.cycles[cycleId], key)) continue;
+    const name = (names && names[key]) || known[key] || key;
+    const lib = plan && (plan.library || []).find((e) => exerciseKey(e.name) === key);
+    const placed = plan ? CYCLE_IDS.filter((id) => inCycle(plan.cycles[id], key)) : [];
+    const placedEx = placed.length ? plan.cycles[placed[0]].exercises.find((e) => exerciseKey(e.name) === key) : null;
+    out.push({
+      key, name,
+      type: (lib && lib.type) || (placedEx && placedEx.type) || guessType(name),
+      sessions: live.length,
+      last: live.reduce((m, e) => (e.date > m ? e.date : m), ""),
+      inCycles: placed,
+    });
+  }
+  return out.sort((a, b) => cmp(b.last, a.last) || cmp(a.name, b.name));
+}
+
+export function mergePlan(local, remote) {
+  if (!remote) return local || null;
+  if (!local) return remote;
+  return (remote.u || 0) >= (local.u || 0) ? remote : local;   // empate: ganha o Drive
+}
+
+/* ---------- CSV do plano:  plano;ciclo;nome_ciclo;foco;cor;ordem;exercicio;tipo;atualizado
+   (ciclo 0 = exercícios retirados que têm histórico) ---------- */
+const PLAN_HEADER = ["plano", "ciclo", "nome_ciclo", "foco", "cor", "ordem", "exercicio", "tipo", "atualizado"];
+const PLAN_ALIASES = {
+  plano: "plano", plan: "plano", ciclo: "ciclo", cycle: "ciclo", nome_ciclo: "nome", foco: "foco", focus: "foco",
+  cor: "cor", color: "cor", ordem: "ordem", order: "ordem", exercicio: "exercicio", exercise: "exercicio",
+  tipo: "tipo", type: "tipo", atualizado: "u", updated: "u",
+};
+
+export function planToCsv(plan) {
+  const stamp = fmtStamp(plan.u || 0);
+  const rows = [];
+  const base = (id, c) => [plan.label || "", id, c ? c.name : "", c ? c.focus : "", c ? c.color : ""];
+  for (const id of CYCLE_IDS) {
+    const c = plan.cycles[id];
+    if (!c) continue;
+    if (!c.exercises.length) rows.push([...base(id, c), "", "", "", stamp]);
+    else c.exercises.forEach((e, i) => rows.push([...base(id, c), String(i + 1), e.name, e.type || "", stamp]));
+  }
+  (plan.library || []).forEach((e, i) => rows.push([...base("0", null), String(i + 1), e.name, e.type || "", stamp]));
+  return BOM + [PLAN_HEADER, ...rows].map((r) => r.map(cell).join(SEP)).join("\r\n") + "\r\n";
+}
+
+// Devolve null se o ficheiro estiver vazio; lança erro se o formato for inesperado (nunca se sobrescreve às cegas)
+export function parsePlanCsv(text) {
+  const src = String(text || "").replace(/^\uFEFF/, "");
+  if (!src.trim()) return null;
+  const table = splitTable(src, detectSep(src.split(/\r?\n/, 1)[0]));
+  const idx = {};
+  table[0].forEach((h, i) => {
+    const k = PLAN_ALIASES[exerciseKey(h)];
+    if (k && idx[k] === undefined) idx[k] = i;
+  });
+  if (idx.ciclo === undefined || idx.exercicio === undefined) {
+    throw new Error("O ficheiro do plano no Drive não tem o formato esperado (faltam as colunas ciclo/exercicio). Não foi alterado.");
+  }
+  const plan = emptyPlan("", 0);
+  const buckets = { 0: [], 1: [], 2: [], 3: [] };
+  let label = "";
+  let any = false;
+  for (const r of table.slice(1)) {
+    if (r.every((c) => String(c).trim() === "")) continue;
+    const get = (k) => (idx[k] === undefined ? "" : String(r[idx[k]] == null ? "" : r[idx[k]]).trim());
+    const id = get("ciclo");
+    if (!(id in buckets)) continue;
+    any = true;
+    label = label || get("plano");
+    plan.u = Math.max(plan.u, parseStamp(get("u")));
+    if (id !== "0") {
+      const c = plan.cycles[id];
+      if (get("nome")) c.name = get("nome");
+      if (get("foco")) c.focus = get("foco");
+      if (get("cor")) c.color = get("cor");
+    }
+    const name = cleanName(get("exercicio"));
+    if (name) buckets[id].push({ n: parseInt(get("ordem"), 10) || buckets[id].length + 1, name, type: get("tipo") || guessType(name) });
+  }
+  if (!any) return null;
+  const finish = (list) => {
+    const seen = new Set();
+    return list.sort((a, b) => a.n - b.n).filter((e) => (seen.has(exerciseKey(e.name)) ? false : seen.add(exerciseKey(e.name)))).map(({ name, type }) => ({ name, type }));
+  };
+  for (const id of CYCLE_IDS) plan.cycles[id].exercises = finish(buckets[id]);
+  plan.library = finish(buckets[0]);
+  plan.label = label || "O meu plano";
+  return plan;
 }
 
 /* ---------- registos em memória ----------
@@ -217,16 +436,16 @@ export function loadLocal(storage) {
     const raw = st.getItem(LOCAL_KEY);
     if (raw) {
       const p = JSON.parse(raw);
-      return { logs: p.logs || {}, names: p.names || {} };
+      return { logs: p.logs || {}, names: p.names || {}, plan: p.plan || null };
     }
   } catch (_) { /* cai para vazio */ }
-  return { logs: {}, names: {} };
+  return { logs: {}, names: {}, plan: null };
 }
 
 export function saveLocal(data, storage) {
   try {
     const st = storage || globalThis.localStorage;
-    st.setItem(LOCAL_KEY, JSON.stringify({ v: 2, logs: data.logs, names: data.names }));
+    st.setItem(LOCAL_KEY, JSON.stringify({ v: 3, logs: data.logs, names: data.names, plan: data.plan || null }));
     return true;
   } catch (e) {
     console.error("Falha ao guardar localmente:", e);
@@ -378,15 +597,22 @@ export function createSync({ drive, getLocal, applyRemote, setStatus, kv, today,
     setStatus({ ...s, dirty: version !== syncedVersion });
   };
 
-  async function backupOnce(fileId, folderId) {
+  // items = [[idDoFicheiro, prefixo]]: uma cópia por dia e por ficheiro, feita ANTES da 1.ª alteração do dia
+  async function backupOnce(items, folderId) {
     const day = todayStr();
-    if (kv.get("gymtrack-last-backup") === day) return;
+    const todo = items.filter(([, prefix]) => kv.get(`gymtrack-last-backup:${prefix}`) !== day);
+    if (!todo.length) return;
     try {
       const bf = await drive.ensureFolder(BACKUP_FOLDER_NAME, folderId);
-      await drive.copy(fileId, `gymtrack-registos-${day}.csv`, bf);
-      kv.set("gymtrack-last-backup", day);
-      const all = (await drive.listIn(bf)).sort((a, b) => cmp(b.name, a.name));
-      for (const f of all.slice(BACKUP_KEEP)) await drive.remove(f.id);
+      for (const [id, prefix] of todo) {
+        await drive.copy(id, `${prefix}-${day}.csv`, bf);
+        kv.set(`gymtrack-last-backup:${prefix}`, day);
+      }
+      const all = await drive.listIn(bf);
+      for (const prefix of new Set(items.map((i) => i[1]))) {
+        const mine = all.filter((f) => f.name.startsWith(prefix + "-")).sort((x, y) => cmp(y.name, x.name));
+        for (const f of mine.slice(BACKUP_KEEP)) await drive.remove(f.id);
+      }
     } catch (e) {
       console.warn("Cópia diária falhou (a sincronização continua):", e);
     }
@@ -413,24 +639,45 @@ export function createSync({ drive, getLocal, applyRemote, setStatus, kv, today,
     const account = await checkAccount();
     const folderId = await drive.ensureFolder(FOLDER_NAME, "root");
     const file = await drive.findFile(CSV_NAME, folderId);
+    const planFile = await drive.findFile(PLAN_NAME, folderId);
+
     let remote = { logs: {}, names: {}, skipped: 0 };
     let remoteNorm = null;
     if (file) {
       remote = parseCsv(await drive.download(file.id));          // lança erro se o formato for inesperado
       remoteNorm = logsToCsv(remote.logs, remote.names);
     }
+    let remotePlan = null;
+    let remotePlanNorm = null;
+    if (planFile) {
+      remotePlan = parsePlanCsv(await drive.download(planFile.id));
+      remotePlanNorm = remotePlan ? planToCsv(remotePlan) : null;
+    }
+
     const local = getLocal();
     const logs = mergeLogsU(local.logs, remote.logs);
     const names = { ...remote.names, ...local.names };
+    const plan = mergePlan(local.plan || null, remotePlan);
     const csv = logsToCsv(logs, names);
-    if (csv !== remoteNorm) {
-      if (!file) await drive.create(CSV_NAME, folderId, csv);
-      else {
-        await backupOnce(file.id, folderId);
-        await drive.update(file.id, csv);
+    const planCsv = plan ? planToCsv(plan) : null;
+    const logsChanged = csv !== remoteNorm;
+    const planChanged = planCsv !== null && planCsv !== remotePlanNorm;
+
+    if (logsChanged || planChanged) {
+      const toBackup = [];
+      if (file && logsChanged) toBackup.push([file.id, "gymtrack-registos"]);
+      if (planFile && planChanged) toBackup.push([planFile.id, "gymtrack-plano"]);
+      if (toBackup.length) await backupOnce(toBackup, folderId);
+      if (logsChanged) {
+        if (file) await drive.update(file.id, csv);
+        else await drive.create(CSV_NAME, folderId, csv);
+      }
+      if (planChanged) {
+        if (planFile) await drive.update(planFile.id, planCsv);
+        else await drive.create(PLAN_NAME, folderId, planCsv);
       }
     }
-    applyRemote({ logs, names });
+    applyRemote({ logs, names, plan });
     syncedVersion = startVersion;
     emit({ state: "ok", at: Date.now(), account });
   }
