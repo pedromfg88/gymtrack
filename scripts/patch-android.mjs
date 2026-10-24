@@ -91,7 +91,8 @@ edit(join(MAIN, 'AndroidManifest.xml'), 'android:allowBackup="true"', 'android:a
 
 // 4b) Alarme do temporizador de descanso: recetor do alarme (manifesto) e vibração
 edit(join(MAIN, 'AndroidManifest.xml'), '    </application>', '        <receiver android:name=".RestAlarmReceiver" android:exported="false" />\n    </application>', 'manifesto (recetor do alarme)');
-edit(join(MAIN, 'AndroidManifest.xml'), '<uses-permission android:name="android.permission.INTERNET" />', '<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.VIBRATE" />', 'manifesto (vibração)');
+edit(join(MAIN, 'AndroidManifest.xml'), '<uses-permission android:name="android.permission.INTERNET" />', '<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.VIBRATE" />', 'manifesto (vibração)')
+'<uses-permission android:name="android.permission.VIBRATE" />', '<uses-permission android:name="android.permission.VIBRATE" />\n    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />\n    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" android:maxSdkVersion="32" />', 'manifesto (alarmes exatos)');
 
 // 5) Cores e temas: cor da app em toda a janela (barras do sistema) e no arranque
 write(join(RES, 'values/ic_launcher_background.xml'),
