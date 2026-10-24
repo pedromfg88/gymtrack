@@ -89,10 +89,12 @@ edit('android/gradle.properties', 'org.gradle.jvmargs=-Xmx1536m', 'org.gradle.jv
 // 4) Manifesto: sem backup automático (a sessão vive no Drive) e heap grande (fotografias)
 edit(join(MAIN, 'AndroidManifest.xml'), 'android:allowBackup="true"', 'android:allowBackup="false"\n        android:largeHeap="true"', 'manifesto (backup/heap)');
 
-// 4b) Alarme do temporizador de descanso: recetor do alarme (manifesto) e vibração
+// 4b) Alarme do temporizador de descanso: recetor do alarme (manifesto), vibração e alarmes exatos
 edit(join(MAIN, 'AndroidManifest.xml'), '    </application>', '        <receiver android:name=".RestAlarmReceiver" android:exported="false" />\n    </application>', 'manifesto (recetor do alarme)');
-edit(join(MAIN, 'AndroidManifest.xml'), '<uses-permission android:name="android.permission.INTERNET" />', '<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.VIBRATE" />', 'manifesto (vibração)')
-'<uses-permission android:name="android.permission.VIBRATE" />', '<uses-permission android:name="android.permission.VIBRATE" />\n    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />\n    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" android:maxSdkVersion="32" />', 'manifesto (alarmes exatos)');
+edit(join(MAIN, 'AndroidManifest.xml'), '<uses-permission android:name="android.permission.INTERNET" />', '<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.VIBRATE" />', 'manifesto (vibração)');
+// Sem esta permissão o Android 12+ recusa o AlarmManager.setAlarmClock e o alarme nunca é agendado.
+// USE_EXACT_ALARM (Android 13+) é concedida na instalação; SCHEDULE_EXACT_ALARM cobre o Android 12.
+edit(join(MAIN, 'AndroidManifest.xml'), '<uses-permission android:name="android.permission.VIBRATE" />', '<uses-permission android:name="android.permission.VIBRATE" />\n    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />\n    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" android:maxSdkVersion="32" />', 'manifesto (alarmes exatos)');
 
 // 5) Cores e temas: cor da app em toda a janela (barras do sistema) e no arranque
 write(join(RES, 'values/ic_launcher_background.xml'),
