@@ -64,7 +64,14 @@ public class RestAlarmReceiver extends BroadcastReceiver {
             if (vibrator != null) {
                 long[] pattern = {0, 500, 250, 500, 250, 500, 250, 500};
                 if (Build.VERSION.SDK_INT >= 26) {
-                    vibrator.vibrate(VibrationEffect.createWaveform(pattern, -1));
+                    // Com o ecrã bloqueado a app está em segundo plano, e o Android só deixa uma app
+                    // em segundo plano vibrar se a vibração for declarada como alarme, toque ou
+                    // notificação. Sem estes atributos só vibrava com o telemóvel desbloqueado.
+                    AudioAttributes alarmAttrs = new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_ALARM)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build();
+                    vibrator.vibrate(VibrationEffect.createWaveform(pattern, -1), alarmAttrs);
                 } else {
                     vibrator.vibrate(pattern, -1);
                 }
