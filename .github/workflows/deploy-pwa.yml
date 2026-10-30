@@ -1,0 +1,83 @@
+name: Publicar PWA (iPhone)
+
+on:
+  # Publica sozinho sempre que alteras a app (src/) ou a parte da PWA
+  push:
+    branches: [main, master]
+    paths:
+      - 'src/**'
+      - 'test/**'
+      - 'scripts/**'
+      - 'pwa/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/deploy-pwa.yml'
+  # ...ou manualmente: separador Actions → "Publicar PWA (iPhone)" → Run workflow
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Código
+        uses: actions/checkout@v4
+
+      - name: Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Testes (CSV, sincronização com o Drive, login e temporizador da PWA)
+        run: npm test
+
+      - name: Verificar o ID de cliente Google
+        env:
+          GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
+        run: |
+          if [ -z "$GOOGLE_CLIENT_ID" ]; then
+            echo "::error::Falta a variável GOOGLE_CLIENT_ID (Settings → Secrets and variables → Actions → separador Variables)."
+            exit 1
+          fi
+
+      - name: Compilar a PWA
+        env:
+          GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
+        run: npm run build:pwa
+
+      - name: Configurar o Pages
+        uses: actions/configure-pages@v5
+
+      - name: Carregar o site
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+      - name: Publicar
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Endereço da app
+        run: |
+          {
+            echo "### PWA publicada"
+            echo "- Endereço: ${{ steps.deployment.outputs.page_url }}"
+            echo "- URI de redirecionamento (tem de estar igual no Google Cloud): \`${{ steps.deployment.outputs.page_url }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
