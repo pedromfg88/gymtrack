@@ -2,7 +2,7 @@
   "name": "gymtrack-apk",
   "version": "1.0.0",
   "private": true,
-  "description": "GymTrack — registo de treino (APK Capacitor; dados em CSV no Google Drive)",
+  "description": "GymTrack — registo de treino (APK Capacitor + PWA para iPhone; dados em CSV no Google Drive)",
   "dependencies": {
     "@capacitor/android": "8.5.3",
     "@capacitor/app": "8.1.2",
@@ -20,7 +20,8 @@
   },
   "scripts": {
     "build:web": "node scripts/build-web.mjs",
-    "test": "node test/store.test.mjs",
+    "build:pwa": "node scripts/build-web.mjs --pwa",
+    "test": "node test/store.test.mjs && node test/web.test.mjs",
     "android:add": "cap add android",
     "android:patch": "node scripts/patch-android.mjs",
     "android:sync": "cap sync android",
