@@ -39,7 +39,7 @@ Entra em https://console.cloud.google.com **com a conta Google pessoal** (confir
    Estes segredos são **deste repositório** — não aproveitam os de nenhum outro.
 4. O workflow arranca sozinho quando carregas os ficheiros; se foi antes de criares os segredos, falha com «Falta o segredo…».
    Depois dos segredos: *Actions → Compilar APK → Run workflow*.
-5. Espera ~5–8 min. A APK fica em **Releases → apk-latest → `GymTrack.apk`**.
+5. Espera ~5–8 min. A APK fica em **Releases** (a mais recente no topo, `GymTrack.apk`). Ficam sempre as 2 últimas versões: a nova e a anterior, para voltares atrás se algo correr mal. Link fixo para a última: `https://github.com/pedromfg88/gymtrack/releases/latest/download/GymTrack.apk`.
 
 ## 3. Instalar e ligar à conta certa
 

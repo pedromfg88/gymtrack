@@ -111,12 +111,26 @@ jobs:
           path: ${{ steps.apk.outputs.path }}
           retention-days: 30
 
-      - name: Publicar na secção Releases (apk-latest)
+      - name: Publicar na secção Releases (uma por compilação)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release delete apk-latest --yes --cleanup-tag || true
-          gh release create apk-latest "${{ steps.apk.outputs.path }}" \
-            --title "APK mais recente (v1.0.${{ github.run_number }})" \
+          TAG="build-${{ github.run_number }}"
+          gh release create "$TAG" "${{ steps.apk.outputs.path }}" \
+            --title "GymTrack v1.0.${{ github.run_number }}" \
             --notes "Compilado automaticamente a partir do commit ${GITHUB_SHA::7}. Descarrega o ficheiro .apk e instala-o no telemóvel." \
-            --target "$GITHUB_SHA"
+            --target "$GITHUB_SHA" \
+            --latest
+
+      # Só corre se a compilação e a publicação acima tiverem sucesso.
+      # Se uma compilação falhar, as duas últimas APK boas ficam intactas.
+      - name: Manter só as 2 últimas versões em Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --limit 100 --json tagName,createdAt \
+            --jq 'sort_by(.createdAt) | reverse | .[2:] | .[].tagName' |
+          while read -r TAG; do
+            echo "A apagar a release antiga: $TAG"
+            gh release delete "$TAG" --yes --cleanup-tag
+          done
