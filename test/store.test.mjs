@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  CSV_NAME, FOLDER_NAME, BACKUP_FOLDER_NAME,
+  CSV_NAME, FOLDER_NAME, BACKUP_FOLDER_NAME, PENDING_KEY,
   exerciseKey, logsToCsv, parseCsv, mergeLogsU, liveLogs, setDayEntry,
   createDrive, createSync, classifyError, loadLocal, saveLocal, loadAccount, saveAccount, clearAccount,
   PLAN_NAME, guessType, emptyPlan, planFromTemplate, addExerciseToCycle, removeExerciseFromCycle, moveExercise,
@@ -12,7 +12,7 @@ import {
 import { FakeDrive } from "./fake-drive.mjs";
 
 function makeApp(drive, init = {}) {
-  const kv = { m: new Map(), get(k) { return this.m.get(k); }, set(k, v) { this.m.set(k, v); } };
+  const kv = init.kv || { m: new Map(), get(k) { return this.m.get(k); }, set(k, v) { this.m.set(k, v); } };
   const app = { state: { logs: init.logs || {}, names: init.names || {}, plan: init.plan || null }, statuses: [], kv, day: init.day || "2026-10-21", account: init.account === undefined ? "pedro@gmail.com" : init.account };
   let tok = init.token || "good";
   app.sync = createSync({
@@ -118,6 +118,38 @@ test("armazenamento local: guarda e lê; lixo no armazenamento não rebenta", ()
 });
 
 /* ---------- sincronização ---------- */
+test("«por enviar» fica gravado no telemóvel: sobrevive a fechar a app e só se limpa quando o Drive recebe tudo", async () => {
+  const d = new FakeDrive();
+  const kv = { m: new Map(), get(k) { return this.m.get(k); }, set(k, v) { this.m.set(k, v); } };
+  const consent = Object.assign(new Error("É necessário autorizar o acesso ao Google Drive."), { code: "needs_consent" });
+  // 1) sem login: regista uma série -> fica marcado como por enviar
+  const a = makeApp(d, { kv, getToken: async () => { throw consent; } });
+  a.state.logs = setDayEntry({}, AIR, "2026-11-10", [S(5, 5)], {}, 100);
+  a.sync.markDirty();
+  await a.sync.syncNow();
+  assert.equal(a.last().state, "login");
+  assert.equal(a.last().dirty, true);
+  assert.ok(Number(kv.get(PENDING_KEY)) > 0, "marca guardada");
+  assert.ok(a.sync.pendingSince() > 0);
+  // 2) app fechada e reaberta (novo sincronizador, mesmo telemóvel): continua por enviar
+  const b = makeApp(d, { kv, logs: a.state.logs, names: { [AIR]: "Air Bike" }, getToken: async () => { throw consent; } });
+  assert.equal(b.sync.isDirty(), true);
+  await b.sync.syncNow();
+  assert.equal(b.last().dirty, true);
+  // 3) com login: envia e limpa a marca
+  const c = makeApp(d, { kv, logs: a.state.logs, names: { [AIR]: "Air Bike" } });
+  assert.equal(c.sync.isDirty(), true);
+  await c.sync.syncNow();
+  assert.equal(c.last().state, "ok");
+  assert.equal(c.last().dirty, false);
+  assert.equal(kv.get(PENDING_KEY), "");
+  assert.equal(c.sync.pendingSince(), 0);
+  assert.equal(parseCsv(d.live(CSV_NAME)[0].content).logs[AIR].length, 1);
+  // 4) sem nada por enviar, abrir a app não fica "sujo"
+  const e = makeApp(d, { kv });
+  assert.equal(e.sync.isDirty(), false);
+});
+
 test("1.ª sincronização cria a pasta GymTrack e o ficheiro com os registos do telemóvel", async () => {
   const d = new FakeDrive();
   const app = makeApp(d, { logs: { [AIR]: [{ date: "2026-10-20", sets: [S(5, 5)], u: 10 }] }, names: { [AIR]: "Air Bike" } });

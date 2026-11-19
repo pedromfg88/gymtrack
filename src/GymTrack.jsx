@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from "react"
 import { Check, Plus, X, ChevronDown, Dumbbell, Flame, TrendingUp, RotateCcw } from "lucide-react";
 import { exerciseKey, localISO, mergeLogsU, liveLogs, setDayEntry, loadLocal, saveLocal, loadAccount, saveAccount, clearAccount, createDrive, createSync,
   mergePlan, emptyPlan, planFromTemplate, addExerciseToCycle, removeExerciseFromCycle, moveExercise, setCycleFocus, setPlanLabel, planNames, historyExercises, cleanName } from "./store.mjs";
-import { IS_NATIVE, authorize, dropToken, revokeAndForget, onResume, onBackButton, exitApp, scheduleAlarm, cancelAlarm, stopAlarm } from "./native.js";
+import { IS_NATIVE, IS_IOS, IN_BROWSER_TAB, askPersistentStorage, authorize, dropToken, revokeAndForget, onResume, onBackButton, exitApp, scheduleAlarm, cancelAlarm, stopAlarm } from "./native.js";
 
 /* ============================================================
    DADOS BASE — Planos de treino por período
@@ -691,6 +691,109 @@ function SyncPill({ sync, account, onTap, onConfirm, onSwitch }) {
   );
 }
 
+/* ============================================================
+   COMPONENTES: barreira de login, aviso do Safari e aviso de registos por enviar
+   Sem login no Google Drive a app não se usa: assim os treinos vão sempre para o Drive
+   e não ficam só no telemóvel (onde o iPhone os pode apagar).
+   ============================================================ */
+const fmtSince = (ms) => {
+  if (!ms) return "";
+  const d = new Date(ms);
+  const day = localISO(d) === localISO() ? "hoje" : d.toLocaleDateString("pt-PT", { day: "2-digit", month: "2-digit" });
+  return `${day} às ${d.toLocaleTimeString("pt-PT", { hour: "2-digit", minute: "2-digit" })}`;
+};
+
+function SafariWarning() {
+  if (!(IS_IOS && IN_BROWSER_TAB)) return null;
+  return (
+    <div style={{ marginTop: 14, background: "#2A1F0F", border: "1px solid #FFB02066", borderRadius: 12, padding: "10px 12px", color: "#FFD27A", fontSize: 12.5, lineHeight: 1.5, maxWidth: 380 }}>
+      <b>Estás a usar o GymTrack no Safari.</b> O Safari pode apagar os dados deste site. Toca em <b>Partilhar → Adicionar ao ecrã principal</b> e abre sempre pelo ícone.
+    </div>
+  );
+}
+
+function PendingBanner({ sync, pendingSince, onTap }) {
+  if (!IS_NATIVE || !sync.dirty || !["offline", "error"].includes(sync.state)) return null;
+  return (
+    <button
+      onClick={onTap}
+      style={{
+        display: "block", width: "100%", textAlign: "left", border: "none", cursor: "pointer",
+        background: "#FF6B5B", color: "#0E0F11", padding: "10px 16px", fontSize: 13, fontWeight: 700, lineHeight: 1.4,
+      }}
+    >
+      Treinos só neste telemóvel{pendingSince ? ` (desde ${fmtSince(pendingSince)})` : ""}. Toca para enviar para o Drive.
+      {sync.state === "error" && sync.message ? <div style={{ fontWeight: 500, fontSize: 11.5, marginTop: 2 }}>{sync.message}</div> : null}
+    </button>
+  );
+}
+
+function LoginGate({ sync, resolved, account, pendingSince, onLogin, onRetry, onConfirm, onSwitch }) {
+  const btn = { width: "100%", padding: "14px 16px", borderRadius: 12, fontSize: 15, fontWeight: 800, cursor: "pointer", border: "none", background: "#C8FF3D", color: "#0E0F11", marginTop: 18 };
+  let body;
+  if (!resolved) {
+    body = <div style={{ color: "#8B8D93", fontSize: 14, marginTop: 22 }}>A ligar ao Google Drive…</div>;
+  } else if (sync.state === "confirm") {
+    body = <AccountConfirm email={sync.account} onYes={onConfirm} onNo={onSwitch} />;
+  } else if (sync.state === "wrong_account") {
+    body = (
+      <>
+        <p style={{ color: "#C7C8CC", fontSize: 14, lineHeight: 1.55, marginTop: 18 }}>
+          Entraste com <b style={{ color: "#FF6B5B", wordBreak: "break-all" }}>{sync.account}</b>, mas esta app usa <b style={{ color: "#C8FF3D", wordBreak: "break-all" }}>{sync.expected}</b>.
+        </p>
+        <button onClick={onSwitch} style={btn}>Mudar de conta</button>
+      </>
+    );
+  } else if (sync.state === "login") {
+    body = (
+      <>
+        <p style={{ color: "#C7C8CC", fontSize: 14, lineHeight: 1.55, marginTop: 18 }}>
+          Para usar o GymTrack tens de entrar com a tua conta Google. Os treinos ficam guardados no teu Google Drive e não se perdem se o telemóvel apagar os dados.
+        </p>
+        {account && <p style={{ color: "#8B8D93", fontSize: 12.5, marginTop: 4, wordBreak: "break-all" }}>Conta: {account}</p>}
+        <button onClick={onLogin} style={btn}>Entrar com Google</button>
+        {sync.message && <p style={{ color: "#FF6B5B", fontSize: 12.5, lineHeight: 1.45, marginTop: 10 }}>{sync.message}</p>}
+        {sync.hint === "switched" && !sync.message && (
+          <p style={{ color: "#8B8D93", fontSize: 12, lineHeight: 1.45, marginTop: 10 }}>Se voltar a aparecer a mesma conta, remove o acesso do GymTrack em myaccount.google.com/connections e toca outra vez.</p>
+        )}
+        {account && (
+          <button onClick={onSwitch} style={{ background: "transparent", border: "none", color: "#8B8D93", textDecoration: "underline", fontSize: 12.5, padding: 0, marginTop: 14, cursor: "pointer" }}>
+            Usar outra conta
+          </button>
+        )}
+      </>
+    );
+  } else {
+    // ainda sem conta confirmada e sem chegar ao Google (sem rede ou erro)
+    body = (
+      <>
+        <p style={{ color: "#C7C8CC", fontSize: 14, lineHeight: 1.55, marginTop: 18 }}>
+          {sync.state === "offline" ? "Sem rede. Liga os dados móveis ou o Wi-Fi para entrares com a tua conta Google." : (sync.message || "Não foi possível ligar ao Google Drive.")}
+        </p>
+        <button onClick={onRetry} style={btn}>Tentar outra vez</button>
+      </>
+    );
+  }
+  return (
+    <div style={{ minHeight: "calc(100vh - var(--sat, 0px) - var(--sab, 0px))", background: "#0E0F11", fontFamily: "'Inter', -apple-system, sans-serif" }}>
+      <style>{GLOBAL_CSS}</style>
+      <div style={{ maxWidth: 420, margin: "0 auto", padding: "40px 20px 32px" }}>
+        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, letterSpacing: "0.14em", color: "#C8FF3D", textTransform: "uppercase" }}>GymTrack</div>
+        <h1 style={{ fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 800, fontSize: 36, lineHeight: 1, color: "#F2F3F5", margin: "14px 0 0", textTransform: "uppercase" }}>
+          Entrar no Google Drive
+        </h1>
+        {pendingSince > 0 && resolved && (
+          <div style={{ marginTop: 16, background: "#FF6B5B1A", border: "1px solid #FF6B5B66", borderRadius: 12, padding: "10px 12px", color: "#FFB3AA", fontSize: 12.5, lineHeight: 1.5 }}>
+            Tens treinos guardados só neste telemóvel (desde {fmtSince(pendingSince)}). Entra para os enviar para o Drive.
+          </div>
+        )}
+        {body}
+        <SafariWarning />
+      </div>
+    </div>
+  );
+}
+
 function WorkoutSelector({ activePlan, hasArchive, onOpenArchive, onOpenBackup, workouts, logs, onSelect, sync, onSyncTap, account, onConfirmAccount, onSwitchAccount, onRenamePlan }) {
   const weekStart = startOfWeekISO();
 
@@ -1336,6 +1439,7 @@ export default function GymApp() {
   const [view, setView] = useState({ screen: "home" });
   const [loaded, setLoaded] = useState(false);
   const [sync, setSync] = useState({ state: IS_NATIVE ? "syncing" : "local" });
+  const [resolved, setResolved] = useState(!IS_NATIVE);   // já houve resposta do Google nesta sessão?
   const [account, setAccount] = useState(() => (IS_NATIVE ? loadAccount() : ""));
   const accountRef = useRef(account);
   accountRef.current = account;
@@ -1359,7 +1463,8 @@ export default function GymApp() {
     dataRef.current = first;
     setData(first);
     setLoaded(true);
-    if (!IS_NATIVE) return undefined;      // fora da APK: só guarda neste aparelho
+    askPersistentStorage();
+    if (!IS_NATIVE) return undefined;      // sem ligação ao Google configurada: só guarda neste aparelho
 
     const syncer = createSync({
       drive: createDrive({ getToken: () => authorize(false), onBadToken: dropToken }),
@@ -1368,7 +1473,7 @@ export default function GymApp() {
         const cur = dataRef.current;
         commit({ ...cur, logs: mergeLogsU(cur.logs, logs), names: { ...names, ...cur.names }, plan: mergePlan(cur.plan, plan) });
       },
-      setStatus: setSync,
+      setStatus: (st) => { setSync(st); if (st.state !== "syncing") setResolved(true); },
       kv: localKv,
       getAccount: () => accountRef.current,
     });
@@ -1416,9 +1521,12 @@ export default function GymApp() {
         await authorize(true);
       } catch (e) {
         const code = e && e.code ? String(e.code) : "";
+        // continua no ecrã de entrada (barreira), agora com o motivo à vista
         setSync({
-          state: "error",
-          message: code === "api_10" ? "Google Cloud: o cliente Android (pacote/SHA-1) não corresponde a esta APK." : (e && e.message) || "Não foi possível ligar ao Google Drive.",
+          state: "login",
+          message: code === "api_10" ? "Google Cloud: o cliente Android (pacote/SHA-1) não corresponde a esta APK."
+            : e && e.name === "TypeError" ? "Sem rede. Liga os dados móveis ou o Wi-Fi e toca outra vez."
+            : (e && e.message) || "Não foi possível ligar ao Google Drive.",
         });
         return;
       }
@@ -1448,6 +1556,23 @@ export default function GymApp() {
       <div style={{ height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#0E0F11", color: "#5C5E64", fontFamily: "'JetBrains Mono', monospace", fontSize: 13 }}>
         A carregar...
       </div>
+    );
+  }
+
+  // Barreira: sem login no Google (e conta confirmada) a app não se usa
+  const pendingSince = syncRef.current ? syncRef.current.pendingSince() : 0;
+  if (IS_NATIVE && (!resolved || !account || ["login", "confirm", "wrong_account"].includes(sync.state))) {
+    return (
+      <LoginGate
+        sync={sync}
+        resolved={resolved}
+        account={account}
+        pendingSince={pendingSince}
+        onLogin={handleSyncTap}
+        onRetry={() => { if (syncRef.current) syncRef.current.syncNow(); }}
+        onConfirm={handleConfirmAccount}
+        onSwitch={handleSwitchAccount}
+      />
     );
   }
 
@@ -1529,7 +1654,9 @@ export default function GymApp() {
     <div style={{ minHeight: "calc(100vh - var(--sat, 0px) - var(--sab, 0px))", background: "#0E0F11", fontFamily: "'Inter', -apple-system, sans-serif" }}>
       <style>{GLOBAL_CSS}</style>
 
+      <PendingBanner sync={sync} pendingSince={pendingSince} onTap={handleSyncTap} />
       <div style={{ maxWidth: 480, margin: "0 auto" }}>
+        {view.screen === "home" && <div style={{ padding: "0 16px" }}><SafariWarning /></div>}
         {view.screen === "backup" && (
           <BackupView
             logs={live}

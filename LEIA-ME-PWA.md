@@ -73,6 +73,18 @@ Nota: como mexeste em `src/`, o GitHub também compila uma nova APK. Não faz ma
 7. Passada mais de 1 hora aparece «Ligar ao Google Drive»: 1 toque e volta com `Drive ✓`.
 8. «Mudar de conta» (por baixo do indicador) volta a mostrar a escolha de conta.
 
+## Proteção dos dados (desde 19/11/2026)
+
+- **Barreira de login:** sem entrar com a conta Google (e confirmar a conta) a app não abre. Quando o login
+  de ~1 h expira, a app volta ao ecrã «Entrar no Google Drive» na próxima gravação ou ao voltar à app. Um toque
+  renova e envia tudo. As séries já gravadas ficam no telemóvel durante esse passo.
+- **Sem rede:** com o login ainda válido, a app funciona e mostra uma faixa vermelha «Treinos só neste telemóvel»
+  até conseguir enviar. Sem rede e com o login expirado não dá para entrar: liga os dados móveis.
+- **«Por enviar» não se esquece:** fica gravado no telemóvel e sobrevive a fechar a app; ao abrir, envia logo.
+- **Aviso do Safari:** se a app estiver aberta num separador do Safari, aparece um aviso para a adicionar ao ecrã
+  principal. No Safari, o iPhone pode apagar os dados de um site ao fim de ~7 dias; na app do ecrã principal não.
+- A app pede ao iPhone armazenamento persistente (melhor esforço).
+
 ## Limitações do iPhone
 
 - **Temporizador:** o iPhone suspende as páginas em segundo plano. Toca com a app aberta e o ecrã ligado; com o ecrã bloqueado **não toca**.

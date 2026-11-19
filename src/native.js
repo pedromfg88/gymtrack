@@ -29,6 +29,31 @@ const web = IS_APK ? null : createWebAuth({
 });
 
 export const IS_NATIVE = IS_APK || !!(web && web.enabled);
+
+// PWA aberta num separador do Safari/browser (e não pelo ícone do ecrã principal).
+// No iPhone o Safari pode apagar os dados de um site ao fim de ~7 dias sem o abrir; a app do ecrã principal não.
+const standalone = (() => {
+  if (IS_APK) return true;
+  try {
+    return window.navigator.standalone === true || window.matchMedia("(display-mode: standalone)").matches;
+  } catch (_) { return false; }
+})();
+const ua = (() => { try { return window.navigator.userAgent || ""; } catch (_) { return ""; } })();
+export const IS_IOS = !IS_APK && (/iPad|iPhone|iPod/.test(ua) || (/Macintosh/.test(ua) && (window.navigator.maxTouchPoints || 0) > 1));
+export const IN_BROWSER_TAB = !IS_APK && !standalone;
+
+// Pede ao browser para não apagar os dados desta app quando faltar espaço (melhor esforço; a APK não precisa)
+export function askPersistentStorage() {
+  if (IS_APK) return;
+  try {
+    const st = window.navigator.storage;
+    if (st && st.persist) {
+      Promise.resolve(st.persisted ? st.persisted() : false)
+        .then((ok) => (ok ? true : st.persist()))
+        .catch(() => {});
+    }
+  } catch (_) { /* ignora */ }
+}
 const alarm = !IS_APK && IS_NATIVE ? createWebAlarm({ win: window, storage: store }) : null;
 
 // ---- login Google / token do Drive ----

@@ -580,14 +580,20 @@ export function classifyError(e) {
 /* ---------- sincronização ----------
    Regra de ouro: nunca se perde nada. Lê o Drive, JUNTA com o que está no telemóvel
    (ganha a alteração mais recente por exercício+dia), e só depois escreve.
-   Antes da 1.ª alteração de cada dia guarda uma cópia em GymTrack/Backups (últimas 30). */
+   Antes da 1.ª alteração de cada dia guarda uma cópia em GymTrack/Backups (últimas 30).
+   «Por enviar» fica gravado no telemóvel (PENDING_KEY): sobrevive a fechar/recarregar a app
+   e só se limpa quando o Drive confirma que recebeu tudo. */
+
+export const PENDING_KEY = "gymtrack-pending";
 
 export function createSync({ drive, getLocal, applyRemote, setStatus, kv, today, getAccount }) {
   const todayStr = today || (() => localISO());
   let running = null;
   let again = false;
   let timer = null;
-  let version = 0;
+  // Havia alterações por enviar quando a app fechou? Então começa "suja" e envia-as logo.
+  const pendingAtStart = Number(kv.get(PENDING_KEY)) || 0;
+  let version = pendingAtStart ? 1 : 0;
   let syncedVersion = 0;
   let lastState = "idle";
   let who = null;                        // conta ligada (pergunta-se ao Google 1 vez por sessão)
@@ -679,6 +685,7 @@ export function createSync({ drive, getLocal, applyRemote, setStatus, kv, today,
     }
     applyRemote({ logs, names, plan });
     syncedVersion = startVersion;
+    if (version === syncedVersion) kv.set(PENDING_KEY, "");   // o Drive tem tudo
     emit({ state: "ok", at: Date.now(), account });
   }
 
@@ -707,8 +714,13 @@ export function createSync({ drive, getLocal, applyRemote, setStatus, kv, today,
   return {
     syncNow,
     schedule,
-    markDirty() { version++; schedule(); },
+    markDirty() {
+      version++;
+      if (!Number(kv.get(PENDING_KEY))) kv.set(PENDING_KEY, String(Date.now()));   // guarda desde quando há coisas por enviar
+      schedule();
+    },
     isDirty: () => version !== syncedVersion,
+    pendingSince: () => (version !== syncedVersion ? Number(kv.get(PENDING_KEY)) || Date.now() : 0),
     resetAccount() { who = null; },
     retryIfNeeded() {
       if (running || lastState === "login") return undefined;
